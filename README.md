@@ -197,7 +197,7 @@ Navigate to: **http://localhost:8000**
 
 ## Dataset
 
-- **Source**: Netflix Movies and TV Shows dataset
+- **Source**: Netflix Movies and TV Shows dataset (Taken from Kaggle)
 - **Total Titles**: 8,807 (6,131 Movies + 2,676 TV Shows)
 - **Genres**: 42 unique genres
 - **Countries**: 748 unique countries
