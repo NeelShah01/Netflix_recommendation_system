@@ -62,7 +62,7 @@
 ## Project Architecture
 
 ```
-Netflix Data Based/
+Netflix_recommendation_system/
 ├── backend/
 │   ├── app.py                    # FastAPI application (10 REST endpoints)
 │   ├── recommender.py            # ML recommendation engine
@@ -70,22 +70,21 @@ Netflix Data Based/
 │   ├── requirements.txt          # Python dependencies
 │   ├── data/
 │   │   └── netflix_titles.csv    # Raw Netflix dataset (8,807 titles)
-│   └── models/                   # Serialized ML models (auto-generated)
+│   └── models/                   # Serialized ML models (auto-generated, gitignored)
 │       ├── processed_data.pkl
 │       ├── tfidf_vectorizer.pkl
-│       ├── tfidf_matrix.pkl
-│       ├── cosine_similarity.pkl
-│       ├── cast_similarity.pkl
+│       ├── tfidf_matrix.pkl      # Sparse matrix (used for on-the-fly similarity)
+│       ├── cast_matrix.pkl       # Sparse cast matrix
 │       ├── kmeans_model.pkl
 │       └── pca_data.pkl
 ├── frontend/
 │   ├── index.html                # Main page
-│   ├── css/styles.css            # Design system (2000 lines)
+│   ├── css/styles.css            # Design system
 │   └── js/
 │       ├── api.js                # API client with caching
 │       ├── components.js         # Reusable UI components
 │       └── app.js                # Core application logic
-├── netflix_titles.csv            # Original dataset
+├── render.yaml                   # Render deployment config
 └── README.md
 ```
 
@@ -133,7 +132,7 @@ Each description is analyzed for sentiment polarity:
 
 ### 6. K-Means Clustering
 
-15 thematic clusters identified from TF-IDF vectors, with PCA reduction to 2D for visualization. Clusters are auto-labeled by dominant genres.
+15 thematic clusters identified from TF-IDF vectors, with TruncatedSVD reduction to 2D for visualization (TruncatedSVD operates on sparse matrices natively, avoiding the memory cost of PCA). Clusters are auto-labeled by dominant genres.
 
 ---
 
@@ -162,36 +161,57 @@ Full interactive API docs available at: `http://localhost:8000/docs`
 - Python 3.11+
 - pip
 
-### 1. Install Dependencies
+### Quick Start
 
 ```bash
-cd backend
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
+python backend/preprocessing.py   # generates model files (~1-2 min)
+uvicorn app:app --reload --app-dir backend
 ```
 
-### 2. Run Preprocessing (Build ML Models)
+Open **http://localhost:8000** in your browser.
+
+> **Note:** Model files (`*.pkl`) are not included in the repository and are generated locally by `preprocessing.py`. This avoids committing hundreds of MB of binary files to git.
+
+### Step-by-Step
+
+#### 1. Clone the repository
 
 ```bash
-python preprocessing.py
+git clone https://github.com/NeelShah01/Netflix_recommendation_system.git
+cd Netflix_recommendation_system
+```
+
+#### 2. Install Dependencies
+
+```bash
+pip install -r backend/requirements.txt
+```
+
+#### 3. Run Preprocessing (Build ML Models)
+
+```bash
+python backend/preprocessing.py
 ```
 
 This will:
 - Clean and preprocess the Netflix dataset
 - Run VADER sentiment analysis on all descriptions
-- Build TF-IDF vectors and cosine similarity matrix
-- Build cast similarity matrix
-- Perform K-Means clustering with PCA
+- Build sparse TF-IDF vectors and cast feature matrix
+- Perform K-Means clustering with TruncatedSVD for 2D visualization
 - Serialize all models to `backend/models/`
 
-### 3. Start the Server
+#### 4. Start the Server
 
 ```bash
-python -m uvicorn app:app --host 0.0.0.0 --port 8000
+uvicorn app:app --host 0.0.0.0 --port 8000 --app-dir backend
 ```
 
-### 4. Open in Browser
+#### 5. Open in Browser
 
 Navigate to: **http://localhost:8000**
+
+Interactive API docs: **http://localhost:8000/docs**
 
 ---
 
