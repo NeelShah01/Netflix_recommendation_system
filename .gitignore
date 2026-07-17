@@ -1,0 +1,38 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ─── Virtual Environments ─────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ─── ML Model Files (too large for GitHub) ────────────────────────────────────
+# Re-generate locally by running: python backend/preprocessing.py
+backend/models/*.pkl
+
+# ─── Data Files (large, sourced externally) ───────────────────────────────────
+# Keep the CSV in the repo (3 MB is fine), but ignore any other large data files
+# backend/data/*.csv   # uncomment if you want to exclude the CSV too
+
+# ─── IDEs & Editors ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*.suo
+*.user
+.DS_Store
+Thumbs.db
+
+# ─── Logs & Temp ──────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+
+# ─── Node (frontend package manager artifacts) ────────────────────────────────
+node_modules/
+npm-debug.log*

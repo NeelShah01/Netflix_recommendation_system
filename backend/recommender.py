@@ -32,9 +32,8 @@ class RecommendationEngine:
 
     def __init__(self):
         self.df = None
-        self.cosine_sim = None
-        self.cast_sim = None
-        self.tfidf_matrix = None
+        self.tfidf_matrix = None    # Sparse matrix — used for on-the-fly cosine similarity
+        self.cast_matrix = None     # Sparse cast matrix — used for on-the-fly cast similarity
         self.tfidf_vectorizer = None
         self.pca_data = None
         self.title_to_idx = {}
@@ -42,25 +41,35 @@ class RecommendationEngine:
         self._loaded = False
 
     def load_models(self):
-        """Load all pre-computed models and data from disk."""
+        """
+        Load all pre-computed models and data from disk.
+
+        Note: We deliberately do NOT load pre-computed NxN cosine/cast similarity
+        matrices because they are ~591 MB each and cause a MemoryError on load.
+        Instead, we store only the compact sparse TF-IDF and cast matrices and
+        compute cosine similarity on-the-fly (one row at a time) per request.
+        """
         print("Loading recommendation models...")
 
         # Load processed data
         self.df = pd.read_pickle(os.path.join(MODELS_DIR, 'processed_data.pkl'))
 
-        # Load similarity matrices
-        with open(os.path.join(MODELS_DIR, 'cosine_similarity.pkl'), 'rb') as f:
-            self.cosine_sim = pickle.load(f)
-
-        with open(os.path.join(MODELS_DIR, 'cast_similarity.pkl'), 'rb') as f:
-            self.cast_sim = pickle.load(f)
-
-        # Load TF-IDF components
+        # Load sparse TF-IDF matrix (used for on-the-fly content similarity)
         with open(os.path.join(MODELS_DIR, 'tfidf_matrix.pkl'), 'rb') as f:
             self.tfidf_matrix = pickle.load(f)
 
+        # Load TF-IDF vectorizer
         with open(os.path.join(MODELS_DIR, 'tfidf_vectorizer.pkl'), 'rb') as f:
             self.tfidf_vectorizer = pickle.load(f)
+
+        # Load sparse cast matrix (used for on-the-fly cast similarity)
+        cast_matrix_path = os.path.join(MODELS_DIR, 'cast_matrix.pkl')
+        if os.path.exists(cast_matrix_path):
+            with open(cast_matrix_path, 'rb') as f:
+                self.cast_matrix = pickle.load(f)
+        else:
+            print("   [WARN] cast_matrix.pkl not found — cast recommendations disabled. Re-run preprocessing.py.")
+            self.cast_matrix = None
 
         # Load PCA/cluster data
         with open(os.path.join(MODELS_DIR, 'pca_data.pkl'), 'rb') as f:
@@ -75,7 +84,10 @@ class RecommendationEngine:
         }
 
         self._loaded = True
-        print(f"   [OK] Loaded {len(self.df)} titles, similarity matrix {self.cosine_sim.shape}")
+        print(f"   [OK] Loaded {len(self.df)} titles")
+        print(f"   [OK] TF-IDF matrix: {self.tfidf_matrix.shape}")
+        if self.cast_matrix is not None:
+            print(f"   [OK] Cast matrix: {self.cast_matrix.shape}")
 
     def _ensure_loaded(self):
         """Ensure models are loaded before making predictions."""
@@ -136,9 +148,11 @@ class RecommendationEngine:
 
     def recommend_by_title(self, title, n=10, content_type=None):
         """
-        Content-based recommendation: Find titles most similar to the given title
-        using the pre-computed TF-IDF cosine similarity matrix.
+        Content-based recommendation: Find titles most similar to the given title.
+        Computes cosine similarity on-the-fly from the sparse TF-IDF matrix
+        (one row vs. all rows) — avoids loading a giant NxN matrix into memory.
         """
+        from sklearn.metrics.pairwise import cosine_similarity as cos_sim
         self._ensure_loaded()
         idx = self._find_title_index(title)
         if idx is None:
@@ -146,12 +160,15 @@ class RecommendationEngine:
 
         source_row = self.df.iloc[idx]
 
-        # Get similarity scores
-        sim_scores = list(enumerate(self.cosine_sim[idx]))
+        # Compute similarity of this one title against all others (efficient sparse op)
+        query_vec = self.tfidf_matrix[idx]  # shape: (1, n_features)
+        scores = cos_sim(query_vec, self.tfidf_matrix).flatten()  # shape: (n_titles,)
+
+        sim_scores = list(enumerate(scores))
         sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
 
         # Skip the title itself (index 0 = perfect self-match)
-        sim_scores = sim_scores[1:]
+        sim_scores = [s for s in sim_scores if s[0] != idx]
 
         # Filter by content type if specified
         if content_type:
@@ -177,9 +194,15 @@ class RecommendationEngine:
     def recommend_by_cast(self, title, n=10, content_type=None):
         """
         Cast-based recommendation: Find titles with the most similar cast members.
-        Uses the separate cast similarity matrix (CountVectorizer).
+        Computes cast similarity on-the-fly from the sparse cast matrix
+        (CountVectorizer) — avoids loading a giant NxN matrix into memory.
         """
+        from sklearn.metrics.pairwise import cosine_similarity as cos_sim
         self._ensure_loaded()
+
+        if self.cast_matrix is None:
+            return []  # cast_matrix.pkl not available
+
         idx = self._find_title_index(title)
         if idx is None:
             return []
@@ -187,10 +210,13 @@ class RecommendationEngine:
         source_row = self.df.iloc[idx]
         source_cast = set(source_row['cast_list'][:10])
 
-        # Get cast similarity scores
-        sim_scores = list(enumerate(self.cast_sim[idx]))
+        # Compute cast similarity on-the-fly for this one title
+        query_vec = self.cast_matrix[idx]  # shape: (1, n_cast_features)
+        scores = cos_sim(query_vec, self.cast_matrix).flatten()  # shape: (n_titles,)
+
+        sim_scores = list(enumerate(scores))
         sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-        sim_scores = sim_scores[1:]  # Skip self
+        sim_scores = [s for s in sim_scores if s[0] != idx]  # Skip self
 
         # Filter by content type if specified
         if content_type:
@@ -314,8 +340,13 @@ class RecommendationEngine:
             rec_row = self.df.iloc[i]
             score = sim_scores[i]
 
-            # Find which input title it's most similar to
-            input_sims = [(self.df.iloc[idx]['title'], self.cosine_sim[idx][i]) for idx in indices]
+            # Find which input title it's most similar to (on-the-fly, one row each)
+            from sklearn.metrics.pairwise import cosine_similarity as cos_sim
+            input_sims = [
+                (self.df.iloc[src_idx]['title'],
+                 float(cos_sim(self.tfidf_matrix[src_idx], self.tfidf_matrix[i])[0][0]))
+                for src_idx in indices
+            ]
             most_similar_input = max(input_sims, key=lambda x: x[1])
 
             result = self._format_title(rec_row)

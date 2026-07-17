@@ -18,7 +18,7 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
+from sklearn.decomposition import TruncatedSVD
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 warnings.filterwarnings('ignore')
@@ -31,8 +31,7 @@ DATA_PATH = os.path.join(BASE_DIR, 'data', 'netflix_titles.csv')
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
 PROCESSED_DATA_PATH = os.path.join(MODELS_DIR, 'processed_data.pkl')
 TFIDF_MATRIX_PATH = os.path.join(MODELS_DIR, 'tfidf_matrix.pkl')
-COSINE_SIM_PATH = os.path.join(MODELS_DIR, 'cosine_similarity.pkl')
-CAST_SIM_PATH = os.path.join(MODELS_DIR, 'cast_similarity.pkl')
+CAST_MATRIX_PATH = os.path.join(MODELS_DIR, 'cast_matrix.pkl')   # sparse cast matrix
 KMEANS_PATH = os.path.join(MODELS_DIR, 'kmeans_model.pkl')
 PCA_DATA_PATH = os.path.join(MODELS_DIR, 'pca_data.pkl')
 TFIDF_VECTORIZER_PATH = os.path.join(MODELS_DIR, 'tfidf_vectorizer.pkl')
@@ -183,8 +182,14 @@ def create_metadata_soup(df):
 
 
 def build_tfidf_model(df):
-    """Build TF-IDF vectorizer and cosine similarity matrix."""
-    print("[5/8] Building TF-IDF model...")
+    """Build TF-IDF vectorizer and sparse TF-IDF matrix.
+
+    Note: We deliberately do NOT compute the full NxN cosine similarity matrix
+    here. At ~8000 titles that matrix would be 8000x8000 float64 = ~500 MB,
+    causing MemoryError when loaded at server startup. Instead, cosine similarity
+    is computed on-the-fly per request in recommender.py.
+    """
+    print("[5/7] Building TF-IDF model...")
 
     tfidf = TfidfVectorizer(
         stop_words='english',
@@ -195,21 +200,20 @@ def build_tfidf_model(df):
     )
 
     tfidf_matrix = tfidf.fit_transform(df['soup'])
-    print(f"   TF-IDF matrix shape: {tfidf_matrix.shape}")
+    print(f"   TF-IDF sparse matrix shape: {tfidf_matrix.shape}")
 
-    print("   Computing cosine similarity matrix...")
-    cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-    print(f"   Cosine similarity matrix shape: {cosine_sim.shape}")
-
-    return tfidf, tfidf_matrix, cosine_sim
+    return tfidf, tfidf_matrix
 
 
 def build_cast_similarity(df):
     """
-    Build a separate cast-based similarity matrix using CountVectorizer.
+    Build a sparse cast-based feature matrix using CountVectorizer.
     This gives recommendations based primarily on shared cast members.
+
+    Note: We save the sparse matrix (not the full NxN similarity matrix)
+    so that cast similarity can be computed on-the-fly per request.
     """
-    print("[6/8] Building cast similarity matrix...")
+    print("[6/7] Building cast feature matrix...")
 
     # Create cast text: lowercase, no spaces in names
     cast_text = df['cast_list'].apply(
@@ -222,18 +226,21 @@ def build_cast_similarity(df):
     )
 
     cast_matrix = count_vec.fit_transform(cast_text)
-    cast_sim = cosine_similarity(cast_matrix, cast_matrix)
-    print(f"   Cast similarity matrix shape: {cast_sim.shape}")
+    print(f"   Cast sparse matrix shape: {cast_matrix.shape}")
 
-    return cast_sim
+    return cast_matrix
 
 
 def build_clusters(tfidf_matrix, df, n_clusters=15):
     """
     Cluster content into thematic groups using K-Means.
-    Reduce to 2D with PCA for visualization.
+    Reduce to 2D with TruncatedSVD for visualization.
+
+    Note: We use TruncatedSVD (not PCA) because PCA calls .toarray() internally,
+    which densifies the sparse matrix and causes a MemoryError (1.3 GB allocation).
+    TruncatedSVD operates on sparse matrices natively.
     """
-    print(f"[7/8] Building K-Means clusters (k={n_clusters})...")
+    print(f"[7/7] Building K-Means clusters (k={n_clusters})...")
 
     kmeans = KMeans(
         n_clusters=n_clusters,
@@ -244,14 +251,14 @@ def build_clusters(tfidf_matrix, df, n_clusters=15):
     clusters = kmeans.fit_predict(tfidf_matrix)
     df['cluster'] = clusters
 
-    # PCA for 2D visualization
-    print("   Reducing to 2D with PCA...")
-    pca = PCA(n_components=2, random_state=42)
-    pca_result = pca.fit_transform(tfidf_matrix.toarray())
+    # TruncatedSVD for 2D visualization (sparse-compatible, no densification)
+    print("   Reducing to 2D with TruncatedSVD...")
+    svd = TruncatedSVD(n_components=2, random_state=42)
+    svd_result = svd.fit_transform(tfidf_matrix)
 
     pca_data = {
-        'x': pca_result[:, 0].tolist(),
-        'y': pca_result[:, 1].tolist(),
+        'x': svd_result[:, 0].tolist(),
+        'y': svd_result[:, 1].tolist(),
         'cluster': clusters.tolist(),
         'title': df['title'].tolist(),
         'type': df['type'].tolist(),
@@ -278,9 +285,14 @@ def build_clusters(tfidf_matrix, df, n_clusters=15):
     return kmeans, pca_data
 
 
-def save_models(df, tfidf, tfidf_matrix, cosine_sim, cast_sim, kmeans, pca_data):
-    """Serialize all models and processed data."""
-    print("[8/8] Saving models...")
+def save_models(df, tfidf, tfidf_matrix, cast_matrix, kmeans, pca_data):
+    """Serialize all models and processed data.
+
+    Dense NxN similarity matrices (cosine_similarity.pkl, cast_similarity.pkl)
+    are intentionally NOT saved — they are ~591 MB each and cause MemoryError
+    when loaded. Similarity is computed on-the-fly per request instead.
+    """
+    print("[Saving models...]")
     os.makedirs(MODELS_DIR, exist_ok=True)
 
     # Save processed dataframe
@@ -292,20 +304,15 @@ def save_models(df, tfidf, tfidf_matrix, cosine_sim, cast_sim, kmeans, pca_data)
         pickle.dump(tfidf, f)
     print(f"   [OK] TF-IDF vectorizer -> {TFIDF_VECTORIZER_PATH}")
 
-    # Save TF-IDF matrix
+    # Save sparse TF-IDF matrix
     with open(TFIDF_MATRIX_PATH, 'wb') as f:
         pickle.dump(tfidf_matrix, f)
     print(f"   [OK] TF-IDF matrix -> {TFIDF_MATRIX_PATH}")
 
-    # Save cosine similarity matrix
-    with open(COSINE_SIM_PATH, 'wb') as f:
-        pickle.dump(cosine_sim, f)
-    print(f"   [OK] Cosine similarity -> {COSINE_SIM_PATH}")
-
-    # Save cast similarity matrix
-    with open(CAST_SIM_PATH, 'wb') as f:
-        pickle.dump(cast_sim, f)
-    print(f"   [OK] Cast similarity -> {CAST_SIM_PATH}")
+    # Save sparse cast matrix
+    with open(CAST_MATRIX_PATH, 'wb') as f:
+        pickle.dump(cast_matrix, f)
+    print(f"   [OK] Cast matrix -> {CAST_MATRIX_PATH}")
 
     # Save K-Means model
     with open(KMEANS_PATH, 'wb') as f:
@@ -336,17 +343,17 @@ def run_pipeline():
     # Step 4: Feature Engineering
     df = create_metadata_soup(df)
 
-    # Step 5: Build TF-IDF Model
-    tfidf, tfidf_matrix, cosine_sim = build_tfidf_model(df)
+    # Step 5: Build TF-IDF Model (sparse matrix only, no full NxN similarity)
+    tfidf, tfidf_matrix = build_tfidf_model(df)
 
-    # Step 6: Build Cast Similarity
-    cast_sim = build_cast_similarity(df)
+    # Step 6: Build Cast Sparse Matrix
+    cast_matrix = build_cast_similarity(df)
 
     # Step 7: Build Clusters
     kmeans, pca_data = build_clusters(tfidf_matrix, df)
 
-    # Step 8: Save Everything
-    save_models(df, tfidf, tfidf_matrix, cosine_sim, cast_sim, kmeans, pca_data)
+    # Saving
+    save_models(df, tfidf, tfidf_matrix, cast_matrix, kmeans, pca_data)
 
     print("\n" + "=" * 60)
     print("[DONE] Preprocessing complete!")
