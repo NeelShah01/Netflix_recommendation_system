@@ -1,5 +1,5 @@
 ﻿/**
- * api.js â€” Smart Content Recommender API Client
+ * api.js Smart Content Recommender API Client
  * Handles all communication with the FastAPI backend at localhost:8000
  */
 
@@ -8,7 +8,7 @@ const API = (() => {
   const cache = new Map();
   const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-  /* â”€â”€â”€â”€â”€ Helpers â”€â”€â”€â”€â”€ */
+  /* Helpers */
 
   function cacheKey(url, body) {
     return body ? `${url}::${JSON.stringify(body)}` : url;
@@ -63,7 +63,7 @@ const API = (() => {
     }
   }
 
-  /* â”€â”€â”€â”€â”€ Debounce Utility â”€â”€â”€â”€â”€ */
+  /* Debounce Utility */
 
   function debounce(fn, ms = 300) {
     let timer;
@@ -75,7 +75,7 @@ const API = (() => {
     };
   }
 
-  /* â”€â”€â”€â”€â”€ Public API â”€â”€â”€â”€â”€ */
+  /* Public API */
 
   /** Search / autocomplete titles */
   async function searchTitles(query, signal) {
@@ -141,7 +141,7 @@ const API = (() => {
     });
   }
 
-  /* â”€â”€â”€â”€â”€ Expose â”€â”€â”€â”€â”€ */
+  /* Expose */
 
   return {
     searchTitles,
@@ -157,4 +157,5 @@ const API = (() => {
     debounce,
   };
 })();
+
 
