@@ -8,7 +8,8 @@ __pycache__/
 venv/
 .venv/
 env/
-.env/
+.env
+.env.*
 
 # ─── ML Model Files (too large for GitHub) ────────────────────────────────────
 # Re-generate locally by running: python backend/preprocessing.py

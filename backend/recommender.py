@@ -42,57 +42,238 @@ class RecommendationEngine:
 
     def load_models(self):
         """
-        Load all pre-computed models and data from disk.
-
-        Note: We deliberately do NOT load pre-computed NxN cosine/cast similarity
-        matrices because they are ~591 MB each and cause a MemoryError on load.
-        Instead, we store only the compact sparse TF-IDF and cast matrices and
-        compute cosine similarity on-the-fly (one row at a time) per request.
+        Load recommendation models and data.
+        1. If MongoDB is available and empty, seed it.
+        2. Load from MongoDB if available, otherwise fall back to local pickle files.
         """
         print("Loading recommendation models...")
 
-        # Load processed data
-        self.df = pd.read_pickle(os.path.join(MODELS_DIR, 'processed_data.pkl'))
+        # Import database availability and titles collection
+        from database import db_available, titles_col
 
-        # Load sparse TF-IDF matrix (used for on-the-fly content similarity)
-        with open(os.path.join(MODELS_DIR, 'tfidf_matrix.pkl'), 'rb') as f:
-            self.tfidf_matrix = pickle.load(f)
+        # Check database availability
+        if db_available:
+            # 1. Self-seeding check
+            try:
+                if titles_col.count_documents({}) == 0:
+                    print("   [INFO] MongoDB 'titles' collection is empty. Seeding from local processed_data.pkl...")
+                    pickle_path = os.path.join(MODELS_DIR, 'processed_data.pkl')
+                    if os.path.exists(pickle_path):
+                        df_seed = pd.read_pickle(pickle_path)
+                        if 'date_added' in df_seed.columns:
+                            df_seed['date_added'] = df_seed['date_added'].apply(
+                                lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else ''
+                            )
+                        records = df_seed.fillna('').to_dict(orient='records')
+                        for r in records:
+                            if isinstance(r.get('genres_list'), np.ndarray):
+                                r['genres_list'] = r['genres_list'].tolist()
+                            if isinstance(r.get('cast_list'), np.ndarray):
+                                r['cast_list'] = r['cast_list'].tolist()
+                            if isinstance(r.get('country_list'), np.ndarray):
+                                r['country_list'] = r['country_list'].tolist()
+                        titles_col.insert_many(records)
+                        print(f"   [OK] Successfully seeded {len(records)} titles into MongoDB!")
+                    else:
+                        print("   [ERROR] processed_data.pkl not found. Cannot seed MongoDB catalog.")
+            except Exception as e:
+                print(f"   [WARN] Database error during seeding: {e}. Falling back to local files.")
 
-        # Load TF-IDF vectorizer
-        with open(os.path.join(MODELS_DIR, 'tfidf_vectorizer.pkl'), 'rb') as f:
-            self.tfidf_vectorizer = pickle.load(f)
-
-        # Load sparse cast matrix (used for on-the-fly cast similarity)
-        cast_matrix_path = os.path.join(MODELS_DIR, 'cast_matrix.pkl')
-        if os.path.exists(cast_matrix_path):
-            with open(cast_matrix_path, 'rb') as f:
-                self.cast_matrix = pickle.load(f)
+        # Load PCA/cluster data (keeps K-means labels persistent)
+        pca_path = os.path.join(MODELS_DIR, 'pca_data.pkl')
+        if os.path.exists(pca_path):
+            with open(pca_path, 'rb') as f:
+                self.pca_data = pickle.load(f)
         else:
-            print("   [WARN] cast_matrix.pkl not found — cast recommendations disabled. Re-run preprocessing.py.")
+            self.pca_data = {'cluster_labels': {}, 'coords': []}
+
+        # 3. Load database records or fall back to files
+        if db_available:
+            try:
+                self.rebuild_models()
+                self._loaded = True
+                return
+            except Exception as e:
+                print(f"   [WARN] Failed to load from MongoDB: {e}. Falling back to local files.")
+
+        # Fallback to local files
+        try:
+            self.df = pd.read_pickle(os.path.join(MODELS_DIR, 'processed_data.pkl'))
+            with open(os.path.join(MODELS_DIR, 'tfidf_matrix.pkl'), 'rb') as f:
+                self.tfidf_matrix = pickle.load(f)
+            with open(os.path.join(MODELS_DIR, 'tfidf_vectorizer.pkl'), 'rb') as f:
+                self.tfidf_vectorizer = pickle.load(f)
+            cast_matrix_path = os.path.join(MODELS_DIR, 'cast_matrix.pkl')
+            if os.path.exists(cast_matrix_path):
+                with open(cast_matrix_path, 'rb') as f:
+                    self.cast_matrix = pickle.load(f)
+            
+            # Build lookup indices
+            self.title_to_idx = {
+                title.lower(): idx for idx, title in enumerate(self.df['title'])
+            }
+            self.id_to_idx = {
+                show_id: idx for idx, show_id in enumerate(self.df['show_id'])
+            }
+            self._loaded = True
+            print(f"   [OK] Loaded {len(self.df)} titles from local files (FAIL-SAFE MODE)")
+        except Exception as err:
+            print(f"   [CRITICAL] Failed to load local fallback files: {err}")
+
+    def rebuild_models(self):
+        """
+        Loads all catalog documents from MongoDB, generates metadata soups,
+        fits TF-IDF and Cast vectorizers, and updates lookup indexes.
+        """
+        from database import db_available, titles_col
+        from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+
+        if not db_available:
+            print("   [INFO] Rebuild ignored: MongoDB is not available in fail-safe mode.")
+            return
+
+        print("   Rebuilding similarity models from MongoDB...")
+        
+        # Load from MongoDB
+        cursor = titles_col.find({}, {"_id": 0})
+        self.df = pd.DataFrame(list(cursor))
+
+        if len(self.df) == 0:
+            print("   [WARN] Database contains 0 titles. Cannot fit vectorizers.")
+            self.tfidf_matrix = None
             self.cast_matrix = None
+            return
 
-        # Load PCA/cluster data
-        with open(os.path.join(MODELS_DIR, 'pca_data.pkl'), 'rb') as f:
-            self.pca_data = pickle.load(f)
+        # Ensure necessary lists exist
+        self.df['director'] = self.df['director'].fillna('')
+        self.df['cast'] = self.df['cast'].fillna('')
+        self.df['country'] = self.df['country'].fillna('')
+        self.df['rating'] = self.df['rating'].fillna('')
+        self.df['description'] = self.df['description'].fillna('')
+        self.df['listed_in'] = self.df['listed_in'].fillna('')
 
-        # Build lookup indices
+        if 'genres_list' not in self.df.columns:
+            self.df['genres_list'] = self.df['listed_in'].apply(
+                lambda x: [g.strip() for g in x.split(',') if g.strip()] if x else []
+            )
+        if 'cast_list' not in self.df.columns:
+            self.df['cast_list'] = self.df['cast'].apply(
+                lambda x: [c.strip() for c in x.split(',') if c.strip()] if x else []
+            )
+        if 'country_list' not in self.df.columns:
+            self.df['country_list'] = self.df['country'].apply(
+                lambda x: [c.strip() for c in x.split(',') if c.strip()] if x else []
+            )
+        if 'primary_country' not in self.df.columns:
+            self.df['primary_country'] = self.df['country_list'].apply(
+                lambda x: x[0] if x else 'Unknown'
+            )
+        if 'mood' not in self.df.columns:
+            self.df['mood'] = 'thought-provoking'
+
+        # Generate metadata soup dynamically (similar to preprocessing.py)
+        def _build_soup(row):
+            director = row['director'].lower().replace(' ', '').replace(',', ' ') if row['director'] else ''
+            cast_members = row['cast_list'][:5] if row['cast_list'] else []
+            cast = ' '.join([c.lower().replace(' ', '') for c in cast_members])
+            genres = ' '.join([g.lower().replace(' ', '').replace('&', 'and') for g in row['genres_list']])
+            country = row['primary_country'].lower().replace(' ', '') if row['primary_country'] != 'Unknown' else ''
+            description = row['description'].lower() if row['description'] else ''
+            description = re.sub(r'[^a-z0-9\s]', '', description)
+            rating = row['rating'].lower().replace('-', '') if row['rating'] else ''
+
+            soup_parts = [
+                genres, genres, genres,   # 3x weight
+                director, director,       # 2x weight
+                cast, cast,               # 2x weight
+                country,
+                rating,
+                description
+            ]
+            return ' '.join(part for part in soup_parts if part)
+
+        self.df['soup'] = self.df.apply(_build_soup, axis=1)
+
+        # Fit TF-IDF Vectorizer
+        self.tfidf_vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
+        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(self.df['soup'])
+
+        # Fit Cast Count Vectorizer
+        self.cast_vectorizer = CountVectorizer(stop_words='english')
+        cast_soup = self.df['cast_list'].apply(lambda x: ' '.join([c.replace(' ', '').lower() for c in x]))
+        self.cast_matrix = self.cast_vectorizer.fit_transform(cast_soup)
+
+        # Fit separate Genre Vectorizer
+        self.genre_vectorizer = TfidfVectorizer(stop_words='english')
+        genre_soup = self.df['genres_list'].apply(lambda x: ' '.join([g.replace(' ', '').lower() for g in x]) if x else '')
+        self.genre_matrix = self.genre_vectorizer.fit_transform(genre_soup)
+
+        # Fit separate Director + Cast Count Vectorizer
+        self.dir_cast_vectorizer = CountVectorizer(stop_words='english')
+        dir_cast_soup = self.df.apply(
+            lambda r: ' '.join(
+                ([r['director'].replace(' ', '').lower()] if r['director'] else []) +
+                ([c.replace(' ', '').lower() for c in r['cast_list']] if r['cast_list'] else [])
+            ),
+            axis=1
+        )
+        self.dir_cast_matrix = self.dir_cast_vectorizer.fit_transform(dir_cast_soup)
+
+        # Fit separate Description TF-IDF Vectorizer
+        self.desc_vectorizer = TfidfVectorizer(stop_words='english')
+        self.desc_matrix = self.desc_vectorizer.fit_transform(self.df['description'].fillna(''))
+
+        # Build lookups
         self.title_to_idx = {
-            title.lower(): idx for idx, title in enumerate(self.df['title'])
+            row['title'].lower(): idx for idx, row in self.df.iterrows()
         }
         self.id_to_idx = {
-            show_id: idx for idx, show_id in enumerate(self.df['show_id'])
+            row['show_id']: idx for idx, row in self.df.iterrows()
         }
 
-        self._loaded = True
-        print(f"   [OK] Loaded {len(self.df)} titles")
+        # Clear cached autocomplete search results
+        if hasattr(self, '_titles_index_cache'):
+            delattr(self, '_titles_index_cache')
+
+        print(f"   [OK] Loaded {len(self.df)} titles from MongoDB")
         print(f"   [OK] TF-IDF matrix: {self.tfidf_matrix.shape}")
         if self.cast_matrix is not None:
             print(f"   [OK] Cast matrix: {self.cast_matrix.shape}")
+
+    def add_or_update_title(self, show_id, title_data):
+        """Insert a new title or update an existing one in MongoDB, then rebuild vector models."""
+        from database import titles_col
+        
+        # Clean and construct the record
+        record = {**title_data}
+        record['show_id'] = show_id
+        
+        # Ensure array fields are formatted as python lists
+        if 'listed_in' in record and 'genres_list' not in record:
+            record['genres_list'] = [g.strip() for g in record['listed_in'].split(',') if g.strip()]
+        if 'cast' in record and 'cast_list' not in record:
+            record['cast_list'] = [c.strip() for c in record['cast'].split(',') if c.strip()]
+        if 'country' in record and 'country_list' not in record:
+            record['country_list'] = [c.strip() for c in record['country'].split(',') if c.strip()]
+            record['primary_country'] = record['country_list'][0] if record['country_list'] else 'Unknown'
+
+        # Upsert in MongoDB
+        titles_col.update_one({'show_id': show_id}, {'$set': record}, upsert=True)
+
+        # Re-initialize models
+        self.rebuild_models()
+
+    def delete_title(self, show_id):
+        """Remove a title from MongoDB, then rebuild vector models."""
+        from database import titles_col
+        titles_col.delete_one({'show_id': show_id})
+        self.rebuild_models()
 
     def _ensure_loaded(self):
         """Ensure models are loaded before making predictions."""
         if not self._loaded:
             raise RuntimeError("Models not loaded. Call load_models() first.")
+
 
     # ──────────────────────────────────────────
     # Title Lookup & Search
@@ -142,6 +323,27 @@ class RecommendationEngine:
             all_genres.update(genres)
         return sorted(list(all_genres))
 
+    def get_titles_index(self):
+        """
+        Return a compact index of all titles for client-side instant search.
+        Result is cached after first call so subsequent calls are free (O(1)).
+        Only includes the minimal fields needed for autocomplete rendering.
+        """
+        self._ensure_loaded()
+        if hasattr(self, '_titles_index_cache'):
+            return self._titles_index_cache
+
+        cols = ['show_id', 'title', 'type', 'release_year', 'rating', 'listed_in']
+        available = [c for c in cols if c in self.df.columns]
+        records = (
+            self.df[available]
+            .fillna('')
+            .astype({'release_year': str})
+            .to_dict(orient='records')
+        )
+        self._titles_index_cache = records
+        return records
+
     # ──────────────────────────────────────────
     # Recommendation Strategies
     # ──────────────────────────────────────────
@@ -161,8 +363,19 @@ class RecommendationEngine:
         source_row = self.df.iloc[idx]
 
         # Compute similarity of this one title against all others (efficient sparse op)
-        query_vec = self.tfidf_matrix[idx]  # shape: (1, n_features)
-        scores = cos_sim(query_vec, self.tfidf_matrix).flatten()  # shape: (n_titles,)
+        if hasattr(self, 'genre_matrix') and hasattr(self, 'dir_cast_matrix') and hasattr(self, 'desc_matrix'):
+            q_genre = self.genre_matrix[idx]
+            q_dir_cast = self.dir_cast_matrix[idx]
+            q_desc = self.desc_matrix[idx]
+            
+            genre_scores = cos_sim(q_genre, self.genre_matrix).flatten()
+            dir_cast_scores = cos_sim(q_dir_cast, self.dir_cast_matrix).flatten()
+            desc_scores = cos_sim(q_desc, self.desc_matrix).flatten()
+            
+            scores = (0.50 * genre_scores) + (0.25 * dir_cast_scores) + (0.25 * desc_scores)
+        else:
+            query_vec = self.tfidf_matrix[idx]  # shape: (1, n_features)
+            scores = cos_sim(query_vec, self.tfidf_matrix).flatten()  # shape: (n_titles,)
 
         sim_scores = list(enumerate(scores))
         sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
@@ -315,12 +528,21 @@ class RecommendationEngine:
         if not indices:
             return []
 
-        # Compute average TF-IDF vector
-        avg_vector = np.asarray(self.tfidf_matrix[indices].mean(axis=0))
-
         # Compute similarity of average vector against all titles
         from sklearn.metrics.pairwise import cosine_similarity as cs
-        sim_scores = cs(avg_vector, self.tfidf_matrix).flatten()
+        if hasattr(self, 'genre_matrix') and hasattr(self, 'dir_cast_matrix') and hasattr(self, 'desc_matrix'):
+            avg_genre = np.asarray(self.genre_matrix[indices].mean(axis=0))
+            avg_dir_cast = np.asarray(self.dir_cast_matrix[indices].mean(axis=0))
+            avg_desc = np.asarray(self.desc_matrix[indices].mean(axis=0))
+            
+            genre_scores = cs(avg_genre, self.genre_matrix).flatten()
+            dir_cast_scores = cs(avg_dir_cast, self.dir_cast_matrix).flatten()
+            desc_scores = cs(avg_desc, self.desc_matrix).flatten()
+            
+            sim_scores = (0.50 * genre_scores) + (0.25 * dir_cast_scores) + (0.25 * desc_scores)
+        else:
+            avg_vector = np.asarray(self.tfidf_matrix[indices].mean(axis=0))
+            sim_scores = cs(avg_vector, self.tfidf_matrix).flatten()
 
         # Get sorted indices (excluding the input titles)
         sorted_indices = sim_scores.argsort()[::-1]

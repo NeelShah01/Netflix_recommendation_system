@@ -17,6 +17,7 @@
     searchAbortController: null,
     genres: [],
     stats: null,
+    sidebarView: 'profile',   // 'profile' | 'watchlists' | 'watched-movies' | 'watched-tv'
   };
 
   /* ═══════════════════ DOM REFS ═══════════════════ */
@@ -36,6 +37,9 @@
     initFooterLinks();
     loadInitialData();
     initStaggeredReveal();
+    initAuth();
+    initSidebar();
+    initWatchlistPicker();
   });
 
   /* ═══════════════════ PARTICLE SYSTEM ═══════════════════ */
@@ -426,10 +430,12 @@
         // Close panel
         state.multiSelectMode = false;
         panel.classList.remove('visible');
-        setTimeout(() => panel.classList.add('hidden'), 400);
+        setTimeout(() => {
+          panel.classList.add('hidden');
+          // Scroll to results after the panel is fully hidden and document layout has settled
+          container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 500);
 
-        // Scroll to results
-        container.scrollIntoView({ behavior: 'smooth', block: 'start' });
         Components.toast(`Found ${recs.length} recommendations!`, 'success');
       } catch (err) {
         container.innerHTML = '';
@@ -536,8 +542,46 @@
 
     state.currentModalItem = fullItem;
     Components.populateModal(fullItem);
+    updateModalUserActions(fullItem);
     modal.classList.add('open');
     document.body.style.overflow = 'hidden';
+  }
+
+  function updateModalUserActions(item) {
+    const actionsEl = $('modalUserActions');
+    if (!actionsEl) return;
+    if (!Auth.isLoggedIn()) {
+      actionsEl.innerHTML = '';
+      return;
+    }
+    const isWatched = WatchlistManager.isWatched(item);
+    const inList = WatchlistManager.isInAnyList(item);
+    actionsEl.innerHTML = `
+      <button id="modalWatchlistBtn" class="btn btn-glass ${inList ? 'active-action' : ''}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 5v14M5 12h14"/></svg>
+        ${inList ? 'In Watchlist' : 'Add to Watchlist'}
+      </button>
+      <button id="modalWatchedBtn" class="btn btn-glass ${isWatched ? 'active-action watched-active' : ''}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M20 6L9 17l-5-5"/></svg>
+        ${isWatched ? 'Watched ✓' : 'Mark as Watched'}
+      </button>
+    `;
+    $('modalWatchlistBtn')?.addEventListener('click', (e) => {
+      Components.watchlistPickerDropdown(item, e.currentTarget, () => updateModalUserActions(item));
+      // Refresh after picker closes
+      setTimeout(() => updateModalUserActions(item), 500);
+    });
+    $('modalWatchedBtn')?.addEventListener('click', async () => {
+      const alreadyWatched = WatchlistManager.isWatched(item);
+      if (alreadyWatched) {
+        await WatchlistManager.unmarkWatched(item.show_id || item.title);
+        Components.toast(`"${item.title}" removed from watched`, 'info');
+      } else {
+        await WatchlistManager.markWatched(item);
+        Components.toast(`"${item.title}" marked as watched! ✓`, 'success');
+      }
+      updateModalUserActions(item);
+    });
   }
 
   function closeModal() {
@@ -588,12 +632,20 @@
 
   /* ═══════════════════ LOAD DATA ═══════════════════ */
   async function loadInitialData() {
-    // Load all data concurrently
+    // Load all data concurrently — title index loads alongside other data
     const [genresPromise, statsPromise, trendingPromise] = [
       API.getGenres().catch(() => []),
       API.getStats().catch(() => null),
       API.getTrending().catch(() => []),
     ];
+
+    // Kick off title index load in parallel (no await — runs in background)
+    API.loadTitleIndex().catch(() => {});
+
+    // Sync watchlist / watched history from MongoDB if already logged in
+    if (Auth.isLoggedIn()) {
+      WatchlistManager.loadFromServer().catch(() => {});
+    }
 
     const [genres, stats, trending] = await Promise.all([genresPromise, statsPromise, trendingPromise]);
     const trendingItems = normalizeRecommendationResults(trending);
@@ -764,5 +816,455 @@
       indicator.style.left = `${activeBtn.offsetLeft}px`;
     }
   });
+
+  /* ═══════════════════ AUTH ═══════════════════ */
+  function initAuth() {
+    // Update navbar whenever auth state changes
+    Auth.onChange(updateNavProfile);
+    updateNavProfile(Auth.getUser());
+
+    // Login Modal Open
+    $('navProfileBtn')?.addEventListener('click', () => {
+      if (Auth.isLoggedIn()) {
+        openSidebar();
+      } else {
+        openLoginModal();
+      }
+    });
+
+    // Google Sign-In callback (called by GSI)
+    window.handleGoogleSignIn = async function(response) {
+      try {
+        const payload = parseJwt(response.credential);
+        const result = await Auth.loginWithGoogle(payload);
+        if (result.success) {
+          closeLoginModal();
+          await WatchlistManager.loadFromServer();
+          Components.toast(`Welcome, ${result.user.displayName}! 👋`, 'success');
+        }
+      } catch (e) {
+        Components.toast('Google sign-in failed. Please try again.', 'error');
+      }
+    };
+
+    // Login form
+    initLoginForm();
+  }
+
+  function parseJwt(token) {
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(base64));
+  }
+
+  function updateNavProfile(user) {
+    const btn = $('navProfileBtn');
+    const avatarEl = $('navAvatarDisplay');
+    if (!btn || !avatarEl) return;
+    if (user) {
+      if (user.picture) {
+        avatarEl.innerHTML = `<img src="${user.picture}" alt="Profile" style="width:36px;height:36px;border-radius:50%;object-fit:cover;" />`;
+      } else {
+        avatarEl.innerHTML = `<span class="nav-avatar-letter" style="background:${user.gradient}">${user.avatar}</span>`;
+      }
+      btn.title = user.displayName;
+    } else {
+      avatarEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2M12 11a4 4 0 100-8 4 4 0 010 8z"/></svg>`;
+      btn.title = 'Sign In';
+    }
+  }
+
+  /* ─── Login Modal ─── */
+  function openLoginModal() {
+    const modal = $('loginModal');
+    if (!modal) return;
+    modal.classList.add('open');
+    document.body.style.overflow = 'hidden';
+    $('loginEmailInput')?.focus();
+    // Reset to login tab
+    switchAuthTab('login');
+  }
+
+  function closeLoginModal() {
+    const modal = $('loginModal');
+    if (!modal) return;
+    modal.classList.remove('open');
+    document.body.style.overflow = '';
+    clearLoginErrors();
+  }
+
+  function switchAuthTab(tab) {
+    const loginTab = $('loginTabBtn');
+    const registerTab = $('registerTabBtn');
+    const nameWrap = $('loginNameWrap');
+    const submitBtn = $('loginSubmitBtn');
+    const formTitle = $('loginFormTitle');
+
+    if (tab === 'login') {
+      loginTab?.classList.add('active');
+      registerTab?.classList.remove('active');
+      if (nameWrap) nameWrap.style.display = 'none';
+      if (submitBtn) submitBtn.textContent = 'Sign In';
+      if (formTitle) formTitle.textContent = 'Welcome back';
+    } else {
+      registerTab?.classList.add('active');
+      loginTab?.classList.remove('active');
+      if (nameWrap) nameWrap.style.display = 'block';
+      if (submitBtn) submitBtn.textContent = 'Create Account';
+      if (formTitle) formTitle.textContent = 'Create account';
+    }
+    clearLoginErrors();
+  }
+
+  function clearLoginErrors() {
+    $$('.login-field-error').forEach(el => el.textContent = '');
+    $$('.login-input.error').forEach(el => el.classList.remove('error'));
+  }
+
+  function showFieldError(fieldId, errorId, message) {
+    const field = $(fieldId);
+    const errorEl = $(errorId);
+    if (field) field.classList.add('error');
+    if (errorEl) errorEl.textContent = message;
+  }
+
+  function initLoginForm() {
+    $('loginModal')?.addEventListener('click', (e) => {
+      if (e.target === $('loginModal')) closeLoginModal();
+    });
+    $('loginCloseBtn')?.addEventListener('click', closeLoginModal);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && $('loginModal')?.classList.contains('open')) closeLoginModal();
+    });
+
+    $('loginTabBtn')?.addEventListener('click', () => switchAuthTab('login'));
+    $('registerTabBtn')?.addEventListener('click', () => switchAuthTab('register'));
+
+    // Password show/hide
+    $('loginPasswordToggle')?.addEventListener('click', () => {
+      const input = $('loginPasswordInput');
+      if (!input) return;
+      const isText = input.type === 'text';
+      input.type = isText ? 'password' : 'text';
+      $('loginPasswordToggle').innerHTML = isText
+        ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`
+        : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24M1 1l22 22"/></svg>`;
+    });
+
+    // Real-time validation
+    $('loginEmailInput')?.addEventListener('input', () => {
+      const val = $('loginEmailInput').value;
+      if (val.length > 3) {
+        const check = Auth.validateEmail(val);
+        if (!check.valid) {
+          showFieldError('loginEmailInput', 'loginEmailError', check.error);
+        } else {
+          $('loginEmailInput').classList.remove('error');
+          $('loginEmailError').textContent = '';
+        }
+      }
+    });
+
+    $('loginPasswordInput')?.addEventListener('input', () => {
+      const val = $('loginPasswordInput').value;
+      if (val.length > 0) {
+        const check = Auth.validatePassword(val);
+        const activeTab = document.querySelector('.auth-tab.active')?.dataset.tab;
+        if (!check.valid && activeTab === 'register') {
+          showFieldError('loginPasswordInput', 'loginPasswordError', check.error);
+        } else {
+          $('loginPasswordInput').classList.remove('error');
+          $('loginPasswordError').textContent = '';
+        }
+      }
+    });
+
+    // Submit
+    $('loginSubmitBtn')?.addEventListener('click', async () => {
+      clearLoginErrors();
+      const isRegister = $('registerTabBtn')?.classList.contains('active');
+      const email = $('loginEmailInput')?.value.trim() || '';
+      const password = $('loginPasswordInput')?.value || '';
+      const displayName = isRegister ? ($('loginNameInput')?.value.trim() || '') : null;
+
+      // Show loading state on button
+      const submitBtn = $('loginSubmitBtn');
+      const originalText = submitBtn.textContent;
+      submitBtn.textContent = isRegister ? 'Creating account...' : 'Signing in...';
+      submitBtn.disabled = true;
+
+      try {
+        // Route to the correct async function
+        const result = isRegister
+          ? await Auth.registerWithEmail(email, password, displayName)
+          : await Auth.loginWithEmail(email, password);
+
+        if (!result.success) {
+          if (result.field === 'email')    showFieldError('loginEmailInput',    'loginEmailError',    result.error);
+          else if (result.field === 'password') showFieldError('loginPasswordInput', 'loginPasswordError', result.error);
+          else if (result.field === 'name')     showFieldError('loginNameInput',      'loginNameError',      result.error);
+          return;
+        }
+        closeLoginModal();
+        await WatchlistManager.loadFromServer();
+        const greeting = isRegister ? `Account created! Welcome, ${result.user.displayName}! 🎉` : `Welcome back, ${result.user.displayName}! 👋`;
+        Components.toast(greeting, 'success');
+      } catch (err) {
+        console.error('[Auth] Submit error:', err);
+        Components.toast('Something went wrong. Please try again.', 'error');
+      } finally {
+        submitBtn.textContent = originalText;
+        submitBtn.disabled = false;
+      }
+    });
+
+    // Enter key on inputs
+    [$('loginEmailInput'), $('loginPasswordInput'), $('loginNameInput')].forEach(el => {
+      el?.addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginSubmitBtn')?.click(); });
+    });
+  }
+
+  /* ═══════════════════ WATCHLIST PICKER ═══════════════════ */
+  function initWatchlistPicker() {
+    document.addEventListener('openWatchlistPicker', (e) => {
+      const { item, anchor } = e.detail;
+      Components.watchlistPickerDropdown(item, anchor, () => renderSidebarContent());
+    });
+  }
+
+  /* ═══════════════════ PROFILE SIDEBAR ═══════════════════ */
+  function openSidebar() {
+    const sidebar = $('profileSidebar');
+    const backdrop = $('sidebarBackdrop');
+    if (!sidebar) return;
+    sidebar.classList.add('open');
+    backdrop?.classList.add('open');
+    renderSidebarContent();
+  }
+
+  function closeSidebar() {
+    const sidebar = $('profileSidebar');
+    const backdrop = $('sidebarBackdrop');
+    sidebar?.classList.remove('open');
+    backdrop?.classList.remove('open');
+  }
+
+  function initSidebar() {
+    $('sidebarBackdrop')?.addEventListener('click', closeSidebar);
+    $('sidebarCloseBtn')?.addEventListener('click', closeSidebar);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && $('profileSidebar')?.classList.contains('open')) closeSidebar();
+    });
+
+    // Nav items
+    $$('.sidebar-nav-item').forEach(btn => {
+      btn.addEventListener('click', () => {
+        $$('.sidebar-nav-item').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.sidebarView = btn.dataset.view;
+        renderSidebarContent();
+      });
+    });
+
+    // Logout
+    $('sidebarLogoutBtn')?.addEventListener('click', () => {
+      Auth.logout();
+      closeSidebar();
+      WatchlistManager.loadFromServer(); // clear watchlist cache
+      Components.toast('You have been signed out.', 'info');
+    });
+
+    // Create list button inside sidebar
+    $('sidebarCreateListBtn')?.addEventListener('click', async () => {
+      const name = prompt('Enter a name for your new watchlist:');
+      if (!name) return;
+      const result = await WatchlistManager.createList(name.trim());
+      if (result && result.error) { Components.toast(result.error, 'warning'); return; }
+      if (result && result.name) { Components.toast(`List "${result.name}" created!`, 'success'); }
+      renderSidebarContent();
+    });
+  }
+
+  function renderSidebarContent() {
+    const user = Auth.getUser();
+    if (!user) return;
+
+    // Update profile header
+    const nameEl = $('sidebarUserName');
+    const emailEl = $('sidebarUserEmail');
+    const avatarEl = $('sidebarAvatar');
+    if (nameEl) nameEl.textContent = user.displayName;
+    if (emailEl) emailEl.textContent = user.email;
+    if (avatarEl) {
+      if (user.picture) {
+        avatarEl.innerHTML = `<img src="${user.picture}" alt="Avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
+      } else {
+        avatarEl.style.background = user.gradient;
+        avatarEl.textContent = user.avatar;
+      }
+    }
+
+    const contentEl = $('sidebarContent');
+    if (!contentEl) return;
+    contentEl.innerHTML = '';
+
+    const view = state.sidebarView || 'profile';
+
+    if (view === 'profile') {
+      renderSidebarProfile(contentEl, user);
+    } else if (view === 'watchlists') {
+      renderSidebarWatchlists(contentEl);
+    } else if (view === 'watched-movies') {
+      renderSidebarWatched(contentEl, 'Movie');
+    } else if (view === 'watched-tv') {
+      renderSidebarWatched(contentEl, 'TV Show');
+    }
+  }
+
+  function renderSidebarProfile(container, user) {
+    container.innerHTML = `
+      <div class="sidebar-section">
+        <h3 class="sidebar-section-title">Account Info</h3>
+        <div class="sidebar-info-row"><span class="sidebar-info-label">Name</span><span class="sidebar-info-value">${Components.escapeHtml(user.displayName)}</span></div>
+        <div class="sidebar-info-row"><span class="sidebar-info-label">Email</span><span class="sidebar-info-value">${Components.escapeHtml(user.email)}</span></div>
+        <div class="sidebar-info-row"><span class="sidebar-info-label">Signed in via</span><span class="sidebar-info-value" style="text-transform:capitalize">${user.provider}</span></div>
+      </div>
+      <div class="sidebar-section">
+        <h3 class="sidebar-section-title">Quick Stats</h3>
+        <div class="sidebar-stats-grid">
+          <div class="sidebar-stat"><span class="sidebar-stat-number">${WatchlistManager.getLists().length}</span><span class="sidebar-stat-label">Watchlists</span></div>
+          <div class="sidebar-stat"><span class="sidebar-stat-number">${WatchlistManager.getLists().reduce((a, l) => a + l.items.length, 0)}</span><span class="sidebar-stat-label">Saved Items</span></div>
+          <div class="sidebar-stat"><span class="sidebar-stat-number">${WatchlistManager.getWatchedByType('Movie').length}</span><span class="sidebar-stat-label">Movies Watched</span></div>
+          <div class="sidebar-stat"><span class="sidebar-stat-number">${WatchlistManager.getWatchedByType('TV Show').length}</span><span class="sidebar-stat-label">Shows Watched</span></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSidebarWatchlists(container) {
+    const lists = WatchlistManager.getLists();
+    const headerEl = document.createElement('div');
+    headerEl.className = 'sidebar-section-header';
+    headerEl.innerHTML = `
+      <h3 class="sidebar-section-title">My Watchlists</h3>
+      <button class="sidebar-create-list-btn" id="sidebarCreateListInline">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><path d="M12 5v14M5 12h14"/></svg>
+        New List
+      </button>
+    `;
+    container.appendChild(headerEl);
+
+    $('sidebarCreateListInline')?.addEventListener('click', () => {
+      const nameInput = document.createElement('div');
+      nameInput.className = 'sidebar-new-list-input-wrap';
+      nameInput.innerHTML = `
+        <input type="text" class="sidebar-new-list-input" placeholder="List name..." maxlength="50" />
+        <button class="sidebar-new-list-save">Save</button>
+        <button class="sidebar-new-list-cancel">×</button>
+      `;
+      container.insertBefore(nameInput, headerEl.nextSibling);
+      const inp = nameInput.querySelector('.sidebar-new-list-input');
+      inp.focus();
+      nameInput.querySelector('.sidebar-new-list-save').addEventListener('click', async () => {
+        const name = inp.value.trim();
+        if (!name) return;
+        const result = await WatchlistManager.createList(name);
+        if (result && result.error) { Components.toast(result.error, 'warning'); return; }
+        if (result && result.name) Components.toast(`List "${result.name}" created!`, 'success');
+        renderSidebarContent();
+      });
+      nameInput.querySelector('.sidebar-new-list-cancel').addEventListener('click', () => nameInput.remove());
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') nameInput.querySelector('.sidebar-new-list-save').click();
+        if (e.key === 'Escape') nameInput.remove();
+      });
+    });
+
+    if (lists.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'sidebar-empty';
+      empty.innerHTML = `<span>📱</span><p>No watchlists yet!</p><p>Click "+ New List" to create one.</p>`;
+      container.appendChild(empty);
+      return;
+    }
+
+    lists.forEach(list => {
+      const section = document.createElement('div');
+      section.className = 'sidebar-list-section';
+      section.innerHTML = `
+        <div class="sidebar-list-header">
+          <button class="sidebar-list-toggle" aria-expanded="false">
+            <svg class="sidebar-list-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><path d="M9 18l6-6-6-6"/></svg>
+            <span class="sidebar-list-name">${Components.escapeHtml(list.name)}</span>
+            <span class="sidebar-list-count">${list.items.length}</span>
+          </button>
+          <button class="sidebar-list-delete" title="Delete list">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6M10 11v6M14 11v6M9 6V4h6v2"/></svg>
+          </button>
+        </div>
+        <div class="sidebar-list-items collapsed"></div>
+      `;
+
+      const toggleBtn = section.querySelector('.sidebar-list-toggle');
+      const itemsEl = section.querySelector('.sidebar-list-items');
+      const arrow = section.querySelector('.sidebar-list-arrow');
+
+      toggleBtn.addEventListener('click', () => {
+        const isOpen = !itemsEl.classList.contains('collapsed');
+        if (isOpen) {
+          itemsEl.classList.add('collapsed');
+          arrow.style.transform = '';
+          toggleBtn.setAttribute('aria-expanded', 'false');
+        } else {
+          itemsEl.classList.remove('collapsed');
+          arrow.style.transform = 'rotate(90deg)';
+          toggleBtn.setAttribute('aria-expanded', 'true');
+          // Populate items
+          itemsEl.innerHTML = '';
+          if (list.items.length === 0) {
+            itemsEl.innerHTML = '<p class="sidebar-list-empty">This list is empty.</p>';
+          } else {
+            list.items.forEach(it => {
+              itemsEl.appendChild(Components.watchlistItemRow(it, list.id, () => renderSidebarContent()));
+            });
+          }
+        }
+      });
+
+      section.querySelector('.sidebar-list-delete').addEventListener('click', async () => {
+        if (!confirm(`Delete watchlist "${list.name}"?`)) return;
+        await WatchlistManager.deleteList(list.id);
+        Components.toast(`"${list.name}" deleted`, 'info');
+        renderSidebarContent();
+      });
+
+      container.appendChild(section);
+    });
+  }
+
+  function renderSidebarWatched(container, type) {
+    const items = WatchlistManager.getWatchedByType(type);
+    const label = type === 'Movie' ? 'Movies' : 'TV Shows';
+
+    const header = document.createElement('div');
+    header.className = 'sidebar-section';
+    header.innerHTML = `<h3 class="sidebar-section-title">Watched ${label} <span class="sidebar-count-badge">${items.length}</span></h3>`;
+    container.appendChild(header);
+
+    if (items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'sidebar-empty';
+      empty.innerHTML = `<span>${type === 'Movie' ? '🎬' : '📺'}</span><p>No ${label.toLowerCase()} watched yet!</p><p>Mark items as watched using the ✓ button on any card.</p>`;
+      container.appendChild(empty);
+      return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'sidebar-watched-list';
+    items.forEach(item => {
+      grid.appendChild(Components.watchedItemCard(item, () => renderSidebarContent()));
+    });
+    container.appendChild(grid);
+  }
 
 })();

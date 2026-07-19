@@ -120,6 +120,16 @@ async def search_titles(
     return results
 
 
+@app.get("/api/titles/index")
+async def get_titles_index():
+    """
+    Return a compact index of ALL titles for client-side instant search.
+    Only includes fields needed for autocomplete: show_id, title, type, release_year, rating, listed_in.
+    Called once on page load — eliminates per-keystroke network requests.
+    """
+    return engine.get_titles_index()
+
+
 @app.get("/api/title/{show_id}")
 async def get_title(show_id: str):
     """Get full details for a specific title by show_id."""
@@ -276,9 +286,301 @@ async def get_trending(
 
 
 # ──────────────────────────────────────────────
-# Run (development)
+# MongoDB User & Catalog APIs
 # ──────────────────────────────────────────────
+import hashlib
+import time
+from database import users_col, watchlists_col, watched_col, titles_col
+
+# Schemas
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    displayName: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class GoogleLoginRequest(BaseModel):
+    email: str
+    name: str
+    picture: Optional[str] = None
+    sub: str
+
+class CreateWatchlistRequest(BaseModel):
+    user_id: str
+    name: str
+
+class WatchlistItemRequest(BaseModel):
+    user_id: str
+    list_name: str
+    show_id: str
+    title: str
+    type: str
+
+class WatchedItemRequest(BaseModel):
+    user_id: str
+    show_id: str
+    title: str
+    type: str
+
+
+def sha256_hash(text: str) -> str:
+    """Helper to hash string using SHA-256 to match database password storage."""
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+# --- Authentication ---
+
+@app.post("/api/auth/register")
+async def register(req: RegisterRequest):
+    email_clean = req.email.strip().lower()
+    if users_col.find_one({"email": email_clean}):
+        raise HTTPException(status_code=400, detail="An account with this email already exists.")
+    
+    uid = "email_" + hashlib.md5(email_clean.encode('utf-8')).hexdigest()
+    
+    # Generate avatar letter and random gradient hue
+    avatar = req.displayName.strip()[0].upper() if req.displayName.strip() else "?"
+    hue = abs(hash(email_clean)) % 360
+    gradient = f"linear-gradient(135deg, hsl({hue}, 70%, 40%), hsl({(hue + 60) % 360}, 80%, 30%))"
+
+    user_record = {
+        "uid": uid,
+        "email": email_clean,
+        "displayName": req.displayName.strip(),
+        "provider": "email",
+        "avatar": avatar,
+        "gradient": gradient,
+        "passwordHash": sha256_hash(req.password),
+        "createdAt": int(time.time())
+    }
+    
+    users_col.insert_one(user_record)
+    
+    # Return user profile without password hash
+    del user_record["_id"]
+    del user_record["passwordHash"]
+    return {"success": True, "user": user_record}
+
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest):
+    email_clean = req.email.strip().lower()
+    user = users_col.find_one({"email": email_clean})
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found for this email. Please register first.")
+    
+    entered_hash = sha256_hash(req.password)
+    if entered_hash != user.get("passwordHash"):
+        raise HTTPException(status_code=401, detail="Incorrect password. Please try again.")
+    
+    user_record = {
+        "uid": user["uid"],
+        "email": user["email"],
+        "displayName": user["displayName"],
+        "provider": user["provider"],
+        "avatar": user["avatar"],
+        "gradient": user["gradient"]
+    }
+    return {"success": True, "user": user_record}
+
+
+@app.post("/api/auth/google")
+async def google_login(req: GoogleLoginRequest):
+    email_clean = req.email.strip().lower()
+    user = users_col.find_one({"email": email_clean})
+    
+    if not user:
+        # Register Google user on first login
+        uid = f"google_{req.sub}"
+        avatar = req.name[0].upper() if req.name else "?"
+        hue = abs(hash(email_clean)) % 360
+        gradient = f"linear-gradient(135deg, hsl({hue}, 70%, 40%), hsl({(hue + 60) % 360}, 80%, 30%))"
+        
+        user_record = {
+            "uid": uid,
+            "email": email_clean,
+            "displayName": req.name,
+            "provider": "google",
+            "avatar": avatar,
+            "gradient": gradient,
+            "picture": req.picture,
+            "createdAt": 1784379430
+        }
+        users_col.insert_one(user_record)
+        user = user_record
+    else:
+        # Update picture if needed
+        if req.picture and user.get("picture") != req.picture:
+            users_col.update_one({"email": email_clean}, {"$set": {"picture": req.picture}})
+            user["picture"] = req.picture
+
+    user_record = {
+        "uid": user["uid"],
+        "email": user["email"],
+        "displayName": user["displayName"],
+        "provider": user["provider"],
+        "avatar": user["avatar"],
+        "gradient": user["gradient"],
+        "picture": user.get("picture")
+    }
+    return {"success": True, "user": user_record}
+
+
+# --- Watchlists ---
+
+@app.get("/api/watchlist")
+async def get_watchlists(user_id: str):
+    lists = list(watchlists_col.find({"user_id": user_id}, {"_id": 0}))
+    # Format to match client structure: { list_name: items[] }
+    result = {}
+    for wl in lists:
+        result[wl["name"]] = wl.get("items", [])
+    return result
+
+
+@app.post("/api/watchlist/create")
+async def create_watchlist(req: CreateWatchlistRequest):
+    # Check if list already exists
+    existing = watchlists_col.find_one({"user_id": req.user_id, "name": req.name})
+    if existing:
+        return {"success": True}
+    
+    watchlists_col.insert_one({
+        "user_id": req.user_id,
+        "name": req.name,
+        "items": []
+    })
+    return {"success": True}
+
+
+@app.delete("/api/watchlist")
+async def delete_watchlist(user_id: str, name: str):
+    watchlists_col.delete_one({"user_id": user_id, "name": name})
+    return {"success": True}
+
+
+@app.post("/api/watchlist/item/add")
+async def add_watchlist_item(req: WatchlistItemRequest):
+    # Ensure watchlist exists
+    wl = watchlists_col.find_one({"user_id": req.user_id, "name": req.list_name})
+    if not wl:
+        # Auto-create if list doesn't exist
+        watchlists_col.insert_one({
+            "user_id": req.user_id,
+            "name": req.list_name,
+            "items": []
+        })
+        wl = {"items": []}
+    
+    # Check duplicate
+    for item in wl.get("items", []):
+        if item.get("show_id") == req.show_id:
+            raise HTTPException(status_code=400, detail="Already in the watchlist")
+            
+    new_item = {
+        "show_id": req.show_id,
+        "title": req.title,
+        "type": req.type
+    }
+    watchlists_col.update_one(
+        {"user_id": req.user_id, "name": req.list_name},
+        {"$push": {"items": new_item}}
+    )
+    return {"success": True}
+
+
+@app.post("/api/watchlist/item/remove")
+async def remove_watchlist_item(req: WatchlistItemRequest):
+    watchlists_col.update_one(
+        {"user_id": req.user_id, "name": req.list_name},
+        {"$pull": {"items": {"show_id": req.show_id}}}
+    )
+    return {"success": True}
+
+
+# --- Watched History ---
+
+@app.get("/api/watched")
+async def get_watched(user_id: str):
+    history = list(watched_col.find({"user_id": user_id}, {"_id": 0}))
+    return history
+
+
+@app.post("/api/watched/add")
+async def add_watched(req: WatchedItemRequest):
+    # Check duplicate
+    existing = watched_col.find_one({"user_id": req.user_id, "show_id": req.show_id})
+    if existing:
+        return {"success": True}
+        
+    watched_record = {
+        "user_id": req.user_id,
+        "show_id": req.show_id,
+        "title": req.title,
+        "type": req.type,
+        "watchedAt": int(time.time())
+    }
+    watched_col.insert_one(watched_record)
+    return {"success": True}
+
+
+@app.post("/api/watched/remove")
+async def remove_watched(req: WatchedItemRequest):
+    watched_col.delete_one({"user_id": req.user_id, "show_id": req.show_id})
+    return {"success": True}
+
+
+# --- Catalog Admin (Dynamic Schema support!) ---
+
+@app.post("/api/catalog/item")
+async def create_catalog_item(body: dict):
+    """
+    Dynamically insert a new movie/show.
+    Accepts arbitrary JSON fields.
+    """
+    if "show_id" not in body or not body["show_id"]:
+        raise HTTPException(status_code=400, detail="Missing required field 'show_id'.")
+    if "title" not in body or not body["title"]:
+        raise HTTPException(status_code=400, detail="Missing required field 'title'.")
+        
+    show_id = body["show_id"]
+    existing = titles_col.find_one({"show_id": show_id})
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Item with show_id '{show_id}' already exists.")
+
+    engine.add_or_update_title(show_id, body)
+    return {"success": True, "message": f"Successfully created title '{body['title']}'."}
+
+
+@app.put("/api/catalog/item/{show_id}")
+async def update_catalog_item(show_id: str, body: dict):
+    """
+    Dynamically update fields or create new fields for a specific show_id.
+    Accepts arbitrary JSON fields.
+    """
+    existing = titles_col.find_one({"show_id": show_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Content with show_id '{show_id}' not found.")
+
+    engine.add_or_update_title(show_id, body)
+    return {"success": True, "message": f"Successfully updated title '{show_id}'."}
+
+
+@app.delete("/api/catalog/item/{show_id}")
+async def delete_catalog_item(show_id: str):
+    """Delete a movie/show from the database and rebuild models."""
+    existing = titles_col.find_one({"show_id": show_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Content with show_id '{show_id}' not found.")
+
+    engine.delete_title(show_id)
+    return {"success": True, "message": f"Successfully deleted title '{show_id}'."}
+
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+

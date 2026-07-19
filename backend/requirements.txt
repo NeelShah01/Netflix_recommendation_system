@@ -6,3 +6,5 @@ scikit-learn
 vaderSentiment
 python-multipart
 joblib
+pymongo
+python-dotenv
