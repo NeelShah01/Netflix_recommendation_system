@@ -304,7 +304,7 @@ class LoginRequest(BaseModel):
 
 class GoogleLoginRequest(BaseModel):
     email: str
-    name: str
+    name: Optional[str] = None
     picture: Optional[str] = None
     sub: str
 
@@ -377,12 +377,12 @@ async def login(req: LoginRequest):
         raise HTTPException(status_code=401, detail="Incorrect password. Please try again.")
     
     user_record = {
-        "uid": user["uid"],
-        "email": user["email"],
-        "displayName": user["displayName"],
-        "provider": user["provider"],
-        "avatar": user["avatar"],
-        "gradient": user["gradient"]
+        "uid": user.get("uid"),
+        "email": user.get("email"),
+        "displayName": user.get("displayName", "User"),
+        "provider": user.get("provider", "email"),
+        "avatar": user.get("avatar") or (user.get("displayName", "U")[0].upper() if user.get("displayName") else "U"),
+        "gradient": user.get("gradient") or "linear-gradient(135deg, #e65c00, #F9D423)"
     }
     return {"success": True, "user": user_record}
 
@@ -418,12 +418,12 @@ async def google_login(req: GoogleLoginRequest):
             user["picture"] = req.picture
 
     user_record = {
-        "uid": user["uid"],
-        "email": user["email"],
-        "displayName": user["displayName"],
-        "provider": user["provider"],
-        "avatar": user["avatar"],
-        "gradient": user["gradient"],
+        "uid": user.get("uid"),
+        "email": user.get("email"),
+        "displayName": user.get("displayName", "Google User"),
+        "provider": user.get("provider", "google"),
+        "avatar": user.get("avatar") or (user.get("displayName", "G")[0].upper() if user.get("displayName") else "G"),
+        "gradient": user.get("gradient") or "linear-gradient(135deg, #e65c00, #F9D423)",
         "picture": user.get("picture")
     }
     return {"success": True, "user": user_record}

@@ -832,7 +832,6 @@
       }
     });
 
-    // Google Sign-In callback (called by GSI)
     window.handleGoogleSignIn = async function(response) {
       try {
         const payload = parseJwt(response.credential);
@@ -841,8 +840,11 @@
           closeLoginModal();
           await WatchlistManager.loadFromServer();
           Components.toast(`Welcome, ${result.user.displayName}! 👋`, 'success');
+        } else {
+          Components.toast(result.error || 'Google sign-in failed.', 'error');
         }
       } catch (e) {
+        console.error('[Google Sign-In Callback Error]:', e);
         Components.toast('Google sign-in failed. Please try again.', 'error');
       }
     };
@@ -852,9 +854,15 @@
   }
 
   function parseJwt(token) {
-    const base64Url = token.split('.')[1];
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    return JSON.parse(atob(base64));
+    try {
+      const base64Url = token.split('.')[1];
+      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64.padEnd(base64.length + (4 - base64.length % 4) % 4, '=');
+      return JSON.parse(atob(padded));
+    } catch (e) {
+      console.error('[parseJwt] failed:', e);
+      throw new Error('Invalid token format');
+    }
   }
 
   function updateNavProfile(user) {
