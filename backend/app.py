@@ -13,7 +13,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -30,6 +30,8 @@ class RecommendRequest(BaseModel):
     title: str = Field(..., description="Title to get recommendations for")
     n_recommendations: int = Field(10, ge=1, le=50, description="Number of recommendations")
     content_type: Optional[str] = Field(None, description="Filter by 'Movie' or 'TV Show'")
+    exclude_genres: Optional[List[str]] = None
+    user_id: Optional[str] = None
 
 
 class CastRecommendRequest(BaseModel):
@@ -37,6 +39,8 @@ class CastRecommendRequest(BaseModel):
     title: str = Field(..., description="Title to find cast-similar content for")
     n_recommendations: int = Field(10, ge=1, le=50)
     content_type: Optional[str] = None
+    exclude_genres: Optional[List[str]] = None
+    user_id: Optional[str] = None
 
 
 class MultiRecommendRequest(BaseModel):
@@ -44,6 +48,8 @@ class MultiRecommendRequest(BaseModel):
     titles: List[str] = Field(..., min_length=1, max_length=10, description="List of liked titles")
     n_recommendations: int = Field(10, ge=1, le=50)
     content_type: Optional[str] = None
+    exclude_genres: Optional[List[str]] = None
+    user_id: Optional[str] = None
 
 
 class GenreRecommendRequest(BaseModel):
@@ -52,6 +58,8 @@ class GenreRecommendRequest(BaseModel):
     mood: Optional[str] = Field(None, description="Mood: feel-good, intense, dark, thought-provoking")
     content_type: Optional[str] = None
     n_recommendations: int = Field(20, ge=1, le=50)
+    exclude_genres: Optional[List[str]] = None
+    user_id: Optional[str] = None
 
 
 # ──────────────────────────────────────────────
@@ -88,6 +96,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Cache-control middleware to prevent browsers caching failed API states
+@app.middleware("http")
+async def add_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 # Serve static frontend files
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend')
@@ -139,6 +157,182 @@ async def get_title(show_id: str):
     return result
 
 
+import urllib.request
+import urllib.parse
+import json
+
+import ssl
+
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "").strip()
+
+
+import re
+
+def clean_query(title: str) -> str:
+    # Replace ampersands with a space
+    cleaned = title.replace("&", " ")
+    # Remove non-alphanumeric characters except spaces
+    cleaned = re.sub(r'[^a-zA-Z0-9\s]', '', cleaned)
+    # Normalize whitespaces
+    cleaned = " ".join(cleaned.split())
+    return cleaned
+
+
+@app.get("/api/media/{show_id}")
+def get_media_metadata(show_id: str):
+    """
+    Fetch poster, backdrop, and trailer key from TMDB API.
+    Caches results in MongoDB to optimize rate limits and performance.
+    """
+    # 1. Fetch title details from the recommendation engine
+    title_details = engine.get_title_details(show_id)
+    if not title_details:
+        raise HTTPException(status_code=404, detail=f"Title with id '{show_id}' not found")
+        
+    title = title_details.get("title")
+    media_type = title_details.get("type")
+    release_year = title_details.get("release_year")
+    
+    # 2. Check cache in MongoDB if database is available
+    from database import db_available, titles_col
+    if db_available and titles_col is not None:
+        try:
+            doc = titles_col.find_one({"show_id": show_id})
+            if doc and isinstance(doc.get("tmdb_data"), dict):
+                return doc["tmdb_data"]
+        except Exception as e:
+            print(f">> [WARN] Failed to query cache from MongoDB: {e}")
+            
+    # 3. If cache miss, fetch from TMDB (if key is set)
+    if not TMDB_API_KEY:
+        return {
+            "status": "no_key",
+            "poster_path": None,
+            "backdrop_path": None,
+            "trailer_url": None,
+            "vote_average": None,
+            "explanation": "Add TMDB_API_KEY to your backend/.env file to enable posters and trailers."
+        }
+        
+    try:
+        # Create unverified SSL context to bypass SSL unexpected EOF errors on Windows/TMDB handshake
+        ssl_context = ssl._create_unverified_context()
+        
+        # Search for title on TMDB
+        cleaned_title = clean_query(title)
+        encoded_query = urllib.parse.quote(cleaned_title)
+        tmdb_type = "movie" if media_type == "Movie" else "tv"
+        
+        search_url = f"http://api.themoviedb.org/3/search/{tmdb_type}?api_key={TMDB_API_KEY}&query={encoded_query}"
+        if release_year:
+            # For movies search key is 'primary_release_year', for TV shows it is 'first_air_date_year'
+            year_key = "primary_release_year" if tmdb_type == "movie" else "first_air_date_year"
+            search_url += f"&{year_key}={release_year}"
+            
+        req = urllib.request.Request(search_url, headers={"User-Agent": "SmartRec/1.0"})
+        with urllib.request.urlopen(req, context=ssl_context, timeout=5) as response:
+            search_data = json.loads(response.read().decode())
+            
+        results = search_data.get("results", [])
+        if not results and release_year:
+            # Try searching again without release year as fallback
+            search_url_fallback = f"http://api.themoviedb.org/3/search/{tmdb_type}?api_key={TMDB_API_KEY}&query={encoded_query}"
+            req_fb = urllib.request.Request(search_url_fallback, headers={"User-Agent": "SmartRec/1.0"})
+            with urllib.request.urlopen(req_fb, context=ssl_context, timeout=5) as response:
+                search_data = json.loads(response.read().decode())
+                results = search_data.get("results", [])
+                
+        if not results:
+            tmdb_data = {
+                "status": "not_found",
+                "poster_path": None,
+                "backdrop_path": None,
+                "trailer_url": None,
+                "vote_average": None
+            }
+            # Cache the negative result to avoid spamming TMDB for missing content
+            if db_available and titles_col is not None:
+                try:
+                    titles_col.update_one({"show_id": show_id}, {"$set": {"tmdb_data": tmdb_data}})
+                except Exception:
+                    pass
+            return tmdb_data
+            
+        # Get best match and retrieve full details + videos
+        best_match = results[0]
+        tmdb_id = best_match["id"]
+        
+        details_url = f"http://api.themoviedb.org/3/{tmdb_type}/{tmdb_id}?api_key={TMDB_API_KEY}&append_to_response=videos"
+        req_details = urllib.request.Request(details_url, headers={"User-Agent": "SmartRec/1.0"})
+        with urllib.request.urlopen(req_details, context=ssl_context, timeout=5) as response:
+            details = json.loads(response.read().decode())
+            
+        poster_path = details.get("poster_path")
+        backdrop_path = details.get("backdrop_path")
+        vote_average = details.get("vote_average")
+        
+        # Extract YouTube trailer video key
+        videos = details.get("videos", {}).get("results", [])
+        trailer_key = None
+        for vid in videos:
+            if vid.get("site") == "YouTube" and vid.get("type") in ["Trailer", "Teaser"]:
+                trailer_key = vid.get("key")
+                if vid.get("type") == "Trailer":
+                    break # Preference for official trailer
+                    
+        trailer_url = f"https://www.youtube.com/embed/{trailer_key}" if trailer_key else None
+        
+        # Resolve poster URL
+        resolved_poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+
+        # Upload poster to Cloudinary on-demand if credentials are set
+        CLOUDINARY_URL = os.getenv("CLOUDINARY_URL", "").strip()
+        if resolved_poster_url and CLOUDINARY_URL:
+            try:
+                import cloudinary
+                import cloudinary.uploader
+                # Automatically uploads the TMDB hotlinked image to Cloudinary CDN
+                upload_result = cloudinary.uploader.upload(
+                    resolved_poster_url,
+                    folder="netflix_posters",
+                    public_id=show_id,
+                    overwrite=True
+                )
+                if upload_result.get("secure_url"):
+                    resolved_poster_url = upload_result["secure_url"]
+            except Exception as cl_err:
+                print(f">> [WARN] Cloudinary upload failed for '{title}' poster: {cl_err}")
+
+        tmdb_data = {
+            "status": "ok",
+            "poster_path": resolved_poster_url,
+            "backdrop_path": f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else None,
+            "trailer_url": trailer_url,
+            "vote_average": round(vote_average, 1) if vote_average else None
+        }
+        
+        # Cache results in MongoDB
+        if db_available and titles_col is not None:
+            try:
+                titles_col.update_one({"show_id": show_id}, {"$set": {"tmdb_data": tmdb_data}})
+            except Exception as e:
+                print(f">> [WARN] Failed to write cache to MongoDB: {e}")
+                
+        return tmdb_data
+        
+    except Exception as e:
+        print(f">> [ERROR] Failed TMDB lookup for '{title}': {e}")
+        return {
+            "status": "error",
+            "poster_path": None,
+            "backdrop_path": None,
+            "trailer_url": None,
+            "vote_average": None,
+            "error_message": str(e)
+        }
+
+
+
 @app.get("/api/genres")
 async def get_genres():
     """Get all available genres sorted alphabetically."""
@@ -161,7 +355,9 @@ async def recommend(req: RecommendRequest):
     results = engine.recommend_by_title(
         title=req.title,
         n=req.n_recommendations,
-        content_type=req.content_type
+        content_type=req.content_type,
+        exclude_genres=req.exclude_genres,
+        user_id=req.user_id
     )
     if not results:
         raise HTTPException(
@@ -186,7 +382,9 @@ async def recommend_by_cast(req: CastRecommendRequest):
     results = engine.recommend_by_cast(
         title=req.title,
         n=req.n_recommendations,
-        content_type=req.content_type
+        content_type=req.content_type,
+        exclude_genres=req.exclude_genres,
+        user_id=req.user_id
     )
     if not results:
         raise HTTPException(
@@ -211,7 +409,9 @@ async def recommend_multi(req: MultiRecommendRequest):
     results = engine.recommend_multi_select(
         titles=req.titles,
         n=req.n_recommendations,
-        content_type=req.content_type
+        content_type=req.content_type,
+        exclude_genres=req.exclude_genres,
+        user_id=req.user_id
     )
     if not results:
         raise HTTPException(
@@ -237,7 +437,9 @@ async def recommend_by_genre(req: GenreRecommendRequest):
         genre=req.genre,
         mood=req.mood,
         content_type=req.content_type,
-        n=req.n_recommendations
+        n=req.n_recommendations,
+        exclude_genres=req.exclude_genres,
+        user_id=req.user_id
     )
     return {
         "filters": {
@@ -290,7 +492,7 @@ async def get_trending(
 # ──────────────────────────────────────────────
 import hashlib
 import time
-from database import users_col, watchlists_col, watched_col, titles_col
+from database import users_col, watchlists_col, watched_col, titles_col, reviews_col
 
 # Schemas
 class RegisterRequest(BaseModel):
@@ -324,6 +526,14 @@ class WatchedItemRequest(BaseModel):
     show_id: str
     title: str
     type: str
+
+
+class ReviewSubmitRequest(BaseModel):
+    user_id: str
+    displayName: str
+    show_id: str
+    rating: int = Field(..., ge=1, le=5)
+    review_text: str
 
 
 def sha256_hash(text: str) -> str:
@@ -578,6 +788,120 @@ async def delete_catalog_item(show_id: str):
 
     engine.delete_title(show_id)
     return {"success": True, "message": f"Successfully deleted title '{show_id}'."}
+
+
+# --- Personalized Recommendations ---
+
+@app.get("/api/recommendations/personalized")
+async def get_personalized_recommendations(
+    user_id: str,
+    limit: int = Query(20, ge=1, le=50),
+    exclude_genres: Optional[List[str]] = Query(None),
+    content_type: Optional[str] = Query(None)
+):
+    """
+    Generate personalized recommendations based on the user's combined watchlist & watched history.
+    """
+    watchlist_titles = []
+    try:
+        lists = list(watchlists_col.find({"user_id": user_id}))
+        for wl in lists:
+            for item in wl.get("items", []):
+                t = item.get("title")
+                if t:
+                    watchlist_titles.append(t)
+    except Exception as e:
+        print(f">> [WARN] Failed to fetch watchlist for personalized recs: {e}")
+        
+    watched_titles = []
+    try:
+        history = list(watched_col.find({"user_id": user_id}))
+        for item in history:
+            t = item.get("title")
+            if t:
+                watched_titles.append(t)
+    except Exception as e:
+        print(f">> [WARN] Failed to fetch watched history for personalized recs: {e}")
+        
+    combined_titles = list(set(watchlist_titles + watched_titles))
+    
+    if not combined_titles:
+        return {
+            "recommendation_type": "personalized",
+            "count": 0,
+            "results": [],
+            "message": "Add items to your watchlist or mark them as watched to see personalized recommendations!"
+        }
+        
+    # Get multi-select recommendations
+    results = engine.recommend_multi_select(
+        titles=combined_titles,
+        n=limit,
+        content_type=content_type,
+        exclude_genres=exclude_genres,
+        user_id=user_id
+    )
+    
+    return {
+        "recommendation_type": "personalized",
+        "count": len(results),
+        "results": results
+    }
+
+
+# --- Ratings & Reviews ---
+
+@app.get("/api/reviews/{show_id}")
+async def get_reviews(show_id: str):
+    """Retrieve all ratings/reviews and calculate the average rating for a show."""
+    try:
+        reviews = list(reviews_col.find({"show_id": show_id}, {"_id": 0}))
+        
+        if not reviews:
+            return {
+                "show_id": show_id,
+                "average_rating": 0.0,
+                "review_count": 0,
+                "reviews": []
+            }
+            
+        total_rating = sum(r.get("rating", 0) for r in reviews)
+        avg_rating = round(total_rating / len(reviews), 1)
+        
+        return {
+            "show_id": show_id,
+            "average_rating": avg_rating,
+            "review_count": len(reviews),
+            "reviews": reviews
+        }
+    except Exception as e:
+        print(f">> [ERROR] Failed to fetch reviews for '{show_id}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve reviews.")
+
+
+@app.post("/api/reviews/submit")
+async def submit_review(req: ReviewSubmitRequest):
+    """Submit or update a rating and review for a show."""
+    try:
+        review_record = {
+            "user_id": req.user_id,
+            "displayName": req.displayName,
+            "show_id": req.show_id,
+            "rating": req.rating,
+            "review_text": req.review_text,
+            "timestamp": int(time.time())
+        }
+        
+        # Upsert the review (one review per user per title)
+        reviews_col.update_one(
+            {"user_id": req.user_id, "show_id": req.show_id},
+            {"$set": review_record},
+            upsert=True
+        )
+        return {"success": True, "message": "Review submitted successfully!"}
+    except Exception as e:
+        print(f">> [ERROR] Failed to submit review: {e}")
+        raise HTTPException(status_code=500, detail="Failed to submit review.")
 
 
 if __name__ == "__main__":

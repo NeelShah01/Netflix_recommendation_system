@@ -43,41 +43,15 @@ class RecommendationEngine:
     def load_models(self):
         """
         Load recommendation models and data.
-        1. If MongoDB is available and empty, seed it.
-        2. Load from MongoDB if available, otherwise fall back to local pickle files.
+        1. Load PCA/cluster data (keeps K-means labels persistent).
+        2. Load local pickle files first so the server is ready instantly.
+        3. If MongoDB is available, trigger a background thread to seed the database
+           (if empty) and refresh/rebuild similarity models from MongoDB.
         """
         print("Loading recommendation models...")
 
         # Import database availability and titles collection
         from database import db_available, titles_col
-
-        # Check database availability
-        if db_available:
-            # 1. Self-seeding check
-            try:
-                if titles_col.count_documents({}) == 0:
-                    print("   [INFO] MongoDB 'titles' collection is empty. Seeding from local processed_data.pkl...")
-                    pickle_path = os.path.join(MODELS_DIR, 'processed_data.pkl')
-                    if os.path.exists(pickle_path):
-                        df_seed = pd.read_pickle(pickle_path)
-                        if 'date_added' in df_seed.columns:
-                            df_seed['date_added'] = df_seed['date_added'].apply(
-                                lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else ''
-                            )
-                        records = df_seed.fillna('').to_dict(orient='records')
-                        for r in records:
-                            if isinstance(r.get('genres_list'), np.ndarray):
-                                r['genres_list'] = r['genres_list'].tolist()
-                            if isinstance(r.get('cast_list'), np.ndarray):
-                                r['cast_list'] = r['cast_list'].tolist()
-                            if isinstance(r.get('country_list'), np.ndarray):
-                                r['country_list'] = r['country_list'].tolist()
-                        titles_col.insert_many(records)
-                        print(f"   [OK] Successfully seeded {len(records)} titles into MongoDB!")
-                    else:
-                        print("   [ERROR] processed_data.pkl not found. Cannot seed MongoDB catalog.")
-            except Exception as e:
-                print(f"   [WARN] Database error during seeding: {e}. Falling back to local files.")
 
         # Load PCA/cluster data (keeps K-means labels persistent)
         pca_path = os.path.join(MODELS_DIR, 'pca_data.pkl')
@@ -87,16 +61,7 @@ class RecommendationEngine:
         else:
             self.pca_data = {'cluster_labels': {}, 'coords': []}
 
-        # 3. Load database records or fall back to files
-        if db_available:
-            try:
-                self.rebuild_models()
-                self._loaded = True
-                return
-            except Exception as e:
-                print(f"   [WARN] Failed to load from MongoDB: {e}. Falling back to local files.")
-
-        # Fallback to local files
+        # Step 1: Load local fallback files FIRST so the server starts instantly
         try:
             self.df = pd.read_pickle(os.path.join(MODELS_DIR, 'processed_data.pkl'))
             with open(os.path.join(MODELS_DIR, 'tfidf_matrix.pkl'), 'rb') as f:
@@ -116,9 +81,47 @@ class RecommendationEngine:
                 show_id: idx for idx, show_id in enumerate(self.df['show_id'])
             }
             self._loaded = True
-            print(f"   [OK] Loaded {len(self.df)} titles from local files (FAIL-SAFE MODE)")
+            print(f"   [OK] Preloaded {len(self.df)} titles from local files. Server is starting immediately!")
         except Exception as err:
-            print(f"   [CRITICAL] Failed to load local fallback files: {err}")
+            print(f"   [CRITICAL] Failed to preload local files: {err}")
+
+        # Step 2: If MongoDB is available, sync and rebuild in a background thread
+        if db_available:
+            import threading
+            def bg_sync():
+                try:
+                    # 1. Seeding check
+                    if titles_col.count_documents({}) == 0:
+                        print("   [INFO] MongoDB 'titles' collection is empty. Seeding from local processed_data.pkl...")
+                        pickle_path = os.path.join(MODELS_DIR, 'processed_data.pkl')
+                        if os.path.exists(pickle_path):
+                            df_seed = pd.read_pickle(pickle_path)
+                            if 'date_added' in df_seed.columns:
+                                df_seed['date_added'] = df_seed['date_added'].apply(
+                                    lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else ''
+                                )
+                            records = df_seed.fillna('').to_dict(orient='records')
+                            for r in records:
+                                if isinstance(r.get('genres_list'), np.ndarray):
+                                    r['genres_list'] = r['genres_list'].tolist()
+                                if isinstance(r.get('cast_list'), np.ndarray):
+                                    r['cast_list'] = r['cast_list'].tolist()
+                                if isinstance(r.get('country_list'), np.ndarray):
+                                    r['country_list'] = r['country_list'].tolist()
+                            titles_col.insert_many(records)
+                            print(f"   [OK] Successfully seeded {len(records)} titles into MongoDB!")
+                        else:
+                            print("   [ERROR] processed_data.pkl not found. Cannot seed MongoDB catalog.")
+                    
+                    # 2. Rebuild similarity models from MongoDB
+                    self.rebuild_models()
+                    print("   [OK] Background refresh of models from MongoDB completed successfully.")
+                except Exception as e:
+                    print(f"   [WARN] Background MongoDB model sync failed: {e}. Keeping local/previous models.")
+            
+            # Start background sync thread as daemon (won't block server shutdown)
+            thread = threading.Thread(target=bg_sync, name="MongoDBSyncThread", daemon=True)
+            thread.start()
 
     def rebuild_models(self):
         """
@@ -136,40 +139,38 @@ class RecommendationEngine:
         
         # Load from MongoDB
         cursor = titles_col.find({}, {"_id": 0})
-        self.df = pd.DataFrame(list(cursor))
+        df_new = pd.DataFrame(list(cursor))
 
-        if len(self.df) == 0:
+        if len(df_new) == 0:
             print("   [WARN] Database contains 0 titles. Cannot fit vectorizers.")
-            self.tfidf_matrix = None
-            self.cast_matrix = None
             return
 
         # Ensure necessary lists exist
-        self.df['director'] = self.df['director'].fillna('')
-        self.df['cast'] = self.df['cast'].fillna('')
-        self.df['country'] = self.df['country'].fillna('')
-        self.df['rating'] = self.df['rating'].fillna('')
-        self.df['description'] = self.df['description'].fillna('')
-        self.df['listed_in'] = self.df['listed_in'].fillna('')
+        df_new['director'] = df_new['director'].fillna('')
+        df_new['cast'] = df_new['cast'].fillna('')
+        df_new['country'] = df_new['country'].fillna('')
+        df_new['rating'] = df_new['rating'].fillna('')
+        df_new['description'] = df_new['description'].fillna('')
+        df_new['listed_in'] = df_new['listed_in'].fillna('')
 
-        if 'genres_list' not in self.df.columns:
-            self.df['genres_list'] = self.df['listed_in'].apply(
+        if 'genres_list' not in df_new.columns:
+            df_new['genres_list'] = df_new['listed_in'].apply(
                 lambda x: [g.strip() for g in x.split(',') if g.strip()] if x else []
             )
-        if 'cast_list' not in self.df.columns:
-            self.df['cast_list'] = self.df['cast'].apply(
+        if 'cast_list' not in df_new.columns:
+            df_new['cast_list'] = df_new['cast'].apply(
                 lambda x: [c.strip() for c in x.split(',') if c.strip()] if x else []
             )
-        if 'country_list' not in self.df.columns:
-            self.df['country_list'] = self.df['country'].apply(
+        if 'country_list' not in df_new.columns:
+            df_new['country_list'] = df_new['country'].apply(
                 lambda x: [c.strip() for c in x.split(',') if c.strip()] if x else []
             )
-        if 'primary_country' not in self.df.columns:
-            self.df['primary_country'] = self.df['country_list'].apply(
+        if 'primary_country' not in df_new.columns:
+            df_new['primary_country'] = df_new['country_list'].apply(
                 lambda x: x[0] if x else 'Unknown'
             )
-        if 'mood' not in self.df.columns:
-            self.df['mood'] = 'thought-provoking'
+        if 'mood' not in df_new.columns:
+            df_new['mood'] = 'thought-provoking'
 
         # Generate metadata soup dynamically (similar to preprocessing.py)
         def _build_soup(row):
@@ -192,44 +193,59 @@ class RecommendationEngine:
             ]
             return ' '.join(part for part in soup_parts if part)
 
-        self.df['soup'] = self.df.apply(_build_soup, axis=1)
+        df_new['soup'] = df_new.apply(_build_soup, axis=1)
 
         # Fit TF-IDF Vectorizer
-        self.tfidf_vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
-        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(self.df['soup'])
+        tfidf_vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
+        tfidf_matrix = tfidf_vectorizer.fit_transform(df_new['soup'])
 
         # Fit Cast Count Vectorizer
-        self.cast_vectorizer = CountVectorizer(stop_words='english')
-        cast_soup = self.df['cast_list'].apply(lambda x: ' '.join([c.replace(' ', '').lower() for c in x]))
-        self.cast_matrix = self.cast_vectorizer.fit_transform(cast_soup)
+        cast_vectorizer = CountVectorizer(stop_words='english')
+        cast_soup = df_new['cast_list'].apply(lambda x: ' '.join([c.replace(' ', '').lower() for c in x]))
+        cast_matrix = cast_vectorizer.fit_transform(cast_soup)
 
         # Fit separate Genre Vectorizer
-        self.genre_vectorizer = TfidfVectorizer(stop_words='english')
-        genre_soup = self.df['genres_list'].apply(lambda x: ' '.join([g.replace(' ', '').lower() for g in x]) if x else '')
-        self.genre_matrix = self.genre_vectorizer.fit_transform(genre_soup)
+        genre_vectorizer = TfidfVectorizer(stop_words='english')
+        genre_soup = df_new['genres_list'].apply(lambda x: ' '.join([g.replace(' ', '').lower() for g in x]) if x else '')
+        genre_matrix = genre_vectorizer.fit_transform(genre_soup)
 
         # Fit separate Director + Cast Count Vectorizer
-        self.dir_cast_vectorizer = CountVectorizer(stop_words='english')
-        dir_cast_soup = self.df.apply(
+        dir_cast_vectorizer = CountVectorizer(stop_words='english')
+        dir_cast_soup = df_new.apply(
             lambda r: ' '.join(
                 ([r['director'].replace(' ', '').lower()] if r['director'] else []) +
                 ([c.replace(' ', '').lower() for c in r['cast_list']] if r['cast_list'] else [])
             ),
             axis=1
         )
-        self.dir_cast_matrix = self.dir_cast_vectorizer.fit_transform(dir_cast_soup)
+        dir_cast_matrix = dir_cast_vectorizer.fit_transform(dir_cast_soup)
 
         # Fit separate Description TF-IDF Vectorizer
-        self.desc_vectorizer = TfidfVectorizer(stop_words='english')
-        self.desc_matrix = self.desc_vectorizer.fit_transform(self.df['description'].fillna(''))
+        desc_vectorizer = TfidfVectorizer(stop_words='english')
+        desc_matrix = desc_vectorizer.fit_transform(df_new['description'].fillna(''))
 
         # Build lookups
-        self.title_to_idx = {
-            row['title'].lower(): idx for idx, row in self.df.iterrows()
+        title_to_idx = {
+            row['title'].lower(): idx for idx, row in df_new.iterrows()
         }
-        self.id_to_idx = {
-            row['show_id']: idx for idx, row in self.df.iterrows()
+        id_to_idx = {
+            row['show_id']: idx for idx, row in df_new.iterrows()
         }
+
+        # Atomically assign to instance variables so that concurrent requests see a consistent state
+        self.df = df_new
+        self.tfidf_vectorizer = tfidf_vectorizer
+        self.tfidf_matrix = tfidf_matrix
+        self.cast_vectorizer = cast_vectorizer
+        self.cast_matrix = cast_matrix
+        self.genre_vectorizer = genre_vectorizer
+        self.genre_matrix = genre_matrix
+        self.dir_cast_vectorizer = dir_cast_vectorizer
+        self.dir_cast_matrix = dir_cast_matrix
+        self.desc_vectorizer = desc_vectorizer
+        self.desc_matrix = desc_matrix
+        self.title_to_idx = title_to_idx
+        self.id_to_idx = id_to_idx
 
         # Clear cached autocomplete search results
         if hasattr(self, '_titles_index_cache'):
@@ -348,7 +364,7 @@ class RecommendationEngine:
     # Recommendation Strategies
     # ──────────────────────────────────────────
 
-    def recommend_by_title(self, title, n=10, content_type=None):
+    def recommend_by_title(self, title, n=10, content_type=None, exclude_genres=None, user_id=None):
         """
         Content-based recommendation: Find titles most similar to the given title.
         Computes cosine similarity on-the-fly from the sparse TF-IDF matrix
@@ -378,20 +394,41 @@ class RecommendationEngine:
             scores = cos_sim(query_vec, self.tfidf_matrix).flatten()  # shape: (n_titles,)
 
         sim_scores = list(enumerate(scores))
-        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
 
-        # Skip the title itself (index 0 = perfect self-match)
-        sim_scores = [s for s in sim_scores if s[0] != idx]
+        # Retrieve user ratings genre boosts
+        boosts = self.get_user_genre_boosts(user_id)
 
-        # Filter by content type if specified
-        if content_type:
-            sim_scores = [
-                (i, score) for i, score in sim_scores
-                if self.df.iloc[i]['type'].lower() == content_type.lower()
-            ]
+        # Exclude and boost
+        boosted_scores = []
+        for i, score in sim_scores:
+            if i == idx:
+                continue
+            rec_row = self.df.iloc[i]
+            
+            # 1. Content Type Filter
+            if content_type and rec_row['type'].lower() != content_type.lower():
+                continue
+                
+            # 2. Exclude Genres Filter
+            if exclude_genres:
+                rec_genres_lower = {g.lower().strip() for g in rec_row.get("genres_list", [])}
+                exclude_genres_lower = {g.lower().strip() for g in exclude_genres}
+                if rec_genres_lower.intersection(exclude_genres_lower):
+                    continue
+                    
+            # 3. Apply Genre Rating Boost
+            boost = 1.0
+            if boosts:
+                for g in rec_row.get("genres_list", []):
+                    g_lower = g.lower().strip()
+                    if g_lower in boosts:
+                        boost = max(boost, boosts[g_lower])
+                        
+            boosted_scores.append((i, float(score) * boost))
 
-        # Take top N
-        top_scores = sim_scores[:n]
+        # Sort by boosted score
+        boosted_scores = sorted(boosted_scores, key=lambda x: x[1], reverse=True)
+        top_scores = boosted_scores[:n]
 
         results = []
         for i, score in top_scores:
@@ -400,11 +437,12 @@ class RecommendationEngine:
             result = self._format_title(rec_row)
             result['similarity_score'] = round(float(score), 4)
             result['explanation'] = explanation
+            result['match_breakdown'] = self._get_match_breakdown([source_row], rec_row)
             results.append(result)
 
         return results
 
-    def recommend_by_cast(self, title, n=10, content_type=None):
+    def recommend_by_cast(self, title, n=10, content_type=None, exclude_genres=None, user_id=None):
         """
         Cast-based recommendation: Find titles with the most similar cast members.
         Computes cast similarity on-the-fly from the sparse cast matrix
@@ -428,20 +466,43 @@ class RecommendationEngine:
         scores = cos_sim(query_vec, self.cast_matrix).flatten()  # shape: (n_titles,)
 
         sim_scores = list(enumerate(scores))
-        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-        sim_scores = [s for s in sim_scores if s[0] != idx]  # Skip self
 
-        # Filter by content type if specified
-        if content_type:
-            sim_scores = [
-                (i, score) for i, score in sim_scores
-                if self.df.iloc[i]['type'].lower() == content_type.lower()
-            ]
+        # Retrieve user ratings genre boosts
+        boosts = self.get_user_genre_boosts(user_id)
 
-        # Only include results with non-zero cast similarity
-        sim_scores = [(i, score) for i, score in sim_scores if score > 0]
+        # Exclude and boost
+        boosted_scores = []
+        for i, score in sim_scores:
+            if i == idx:
+                continue
+            rec_row = self.df.iloc[i]
+            
+            # 1. Content Type Filter
+            if content_type and rec_row['type'].lower() != content_type.lower():
+                continue
+                
+            # 2. Exclude Genres Filter
+            if exclude_genres:
+                rec_genres_lower = {g.lower().strip() for g in rec_row.get("genres_list", [])}
+                exclude_genres_lower = {g.lower().strip() for g in exclude_genres}
+                if rec_genres_lower.intersection(exclude_genres_lower):
+                    continue
+                    
+            # 3. Apply Genre Rating Boost
+            boost = 1.0
+            if boosts:
+                for g in rec_row.get("genres_list", []):
+                    g_lower = g.lower().strip()
+                    if g_lower in boosts:
+                        boost = max(boost, boosts[g_lower])
+                        
+            # Only include results with non-zero cast similarity
+            if score > 0:
+                boosted_scores.append((i, float(score) * boost))
 
-        top_scores = sim_scores[:n]
+        # Sort by boosted score
+        boosted_scores = sorted(boosted_scores, key=lambda x: x[1], reverse=True)
+        top_scores = boosted_scores[:n]
 
         results = []
         for i, score in top_scores:
@@ -458,11 +519,12 @@ class RecommendationEngine:
             result = self._format_title(rec_row)
             result['similarity_score'] = round(float(score), 4)
             result['explanation'] = explanation
+            result['match_breakdown'] = self._get_match_breakdown([source_row], rec_row)
             results.append(result)
 
         return results
 
-    def recommend_by_genre_mood(self, genre=None, mood=None, content_type=None, n=20):
+    def recommend_by_genre_mood(self, genre=None, mood=None, content_type=None, n=20, exclude_genres=None, user_id=None):
         """
         Filter and recommend by genre and/or mood (sentiment).
         Mood values: 'feel-good', 'intense', 'dark', 'thought-provoking'
@@ -480,6 +542,15 @@ class RecommendationEngine:
             filtered = filtered[
                 filtered['genres_list'].apply(
                     lambda genres: any(g.lower() == genre_lower for g in genres)
+                )
+            ]
+
+        # Filter by exclude_genres
+        if exclude_genres:
+            exclude_genres_lower = {g.lower().strip() for g in exclude_genres}
+            filtered = filtered[
+                filtered['genres_list'].apply(
+                    lambda genres: not any(g.lower().strip() in exclude_genres_lower for g in genres)
                 )
             ]
 
@@ -509,11 +580,18 @@ class RecommendationEngine:
                 }
                 parts.append(f"Mood: {mood_labels.get(mood, mood)}")
             result['explanation'] = ' | '.join(parts) if parts else 'Matches your filters'
+            result['match_breakdown'] = {
+                "genres": [genre] if genre else [],
+                "cast": [],
+                "director": None,
+                "country": None,
+                "mood": mood
+            }
             results.append(result)
 
         return results
 
-    def recommend_multi_select(self, titles, n=10, content_type=None):
+    def recommend_multi_select(self, titles, n=10, content_type=None, exclude_genres=None, user_id=None):
         """
         Multi-select profile recommendation: Given multiple liked titles,
         compute an average feature vector and find nearest neighbors.
@@ -528,52 +606,99 @@ class RecommendationEngine:
         if not indices:
             return []
 
-        # Compute similarity of average vector against all titles
+        # Compute candidate recommendations for each liked item individually using round-robin interleaving.
+        # This guarantees representation of all user interests (e.g. movies vs TV shows) and
+        # prevents rare items (with high IDF weights) from completely hijacking the taste profile.
         from sklearn.metrics.pairwise import cosine_similarity as cs
-        if hasattr(self, 'genre_matrix') and hasattr(self, 'dir_cast_matrix') and hasattr(self, 'desc_matrix'):
-            avg_genre = np.asarray(self.genre_matrix[indices].mean(axis=0))
-            avg_dir_cast = np.asarray(self.dir_cast_matrix[indices].mean(axis=0))
-            avg_desc = np.asarray(self.desc_matrix[indices].mean(axis=0))
+        
+        # Retrieve user ratings genre boosts
+        boosts = self.get_user_genre_boosts(user_id)
+
+        candidates_by_item = []
+        for src_idx in indices:
+            # Compute similarities for this specific liked item against all items
+            if hasattr(self, 'genre_matrix') and hasattr(self, 'dir_cast_matrix') and hasattr(self, 'desc_matrix'):
+                q_genre = self.genre_matrix[src_idx]
+                q_dir_cast = self.dir_cast_matrix[src_idx]
+                q_desc = self.desc_matrix[src_idx]
+                
+                genre_scores = cs(q_genre, self.genre_matrix).flatten()
+                dir_cast_scores = cs(q_dir_cast, self.dir_cast_matrix).flatten()
+                desc_scores = cs(q_desc, self.desc_matrix).flatten()
+                
+                scores = (0.50 * genre_scores) + (0.25 * dir_cast_scores) + (0.25 * desc_scores)
+            else:
+                query_vec = self.tfidf_matrix[src_idx]
+                scores = cs(query_vec, self.tfidf_matrix).flatten()
+
+            # Filter and boost
+            item_candidates = []
+            for i, score in enumerate(scores):
+                if i in indices:
+                    continue
+                rec_row = self.df.iloc[i]
+                
+                # 1. Content Type Filter
+                if content_type and rec_row['type'].lower() != content_type.lower():
+                    continue
+                    
+                # 2. Exclude Genres Filter
+                if exclude_genres:
+                    rec_genres_lower = {g.lower().strip() for g in rec_row.get("genres_list", [])}
+                    exclude_genres_lower = {g.lower().strip() for g in exclude_genres}
+                    if rec_genres_lower.intersection(exclude_genres_lower):
+                        continue
+                        
+                # 3. Apply Genre Rating Boost
+                boost = 1.0
+                if boosts:
+                    for g in rec_row.get("genres_list", []):
+                        g_lower = g.lower().strip()
+                        if g_lower in boosts:
+                            boost = max(boost, boosts[g_lower])
+                            
+                item_candidates.append((float(score) * boost, i, src_idx))
             
-            genre_scores = cs(avg_genre, self.genre_matrix).flatten()
-            dir_cast_scores = cs(avg_dir_cast, self.dir_cast_matrix).flatten()
-            desc_scores = cs(avg_desc, self.desc_matrix).flatten()
+            # Sort this item's candidates by score descending
+            item_candidates = sorted(item_candidates, key=lambda x: x[0], reverse=True)
+            candidates_by_item.append(item_candidates)
+
+        # Interleave recommendations across liked items (Round-Robin)
+        selected_candidates = []
+        selected_indices = set()
+        
+        for step in range(n):
+            if len(selected_candidates) >= n:
+                break
             
-            sim_scores = (0.50 * genre_scores) + (0.25 * dir_cast_scores) + (0.25 * desc_scores)
-        else:
-            avg_vector = np.asarray(self.tfidf_matrix[indices].mean(axis=0))
-            sim_scores = cs(avg_vector, self.tfidf_matrix).flatten()
+            any_added = False
+            for item_candidates in candidates_by_item:
+                if step < len(item_candidates):
+                    score, cand_idx, src_idx = item_candidates[step]
+                    if cand_idx not in selected_indices:
+                        selected_candidates.append((score, cand_idx, src_idx))
+                        selected_indices.add(cand_idx)
+                        any_added = True
+                        if len(selected_candidates) >= n:
+                            break
+            
+            if not any_added:
+                break
 
-        # Get sorted indices (excluding the input titles)
-        sorted_indices = sim_scores.argsort()[::-1]
-        sorted_indices = [i for i in sorted_indices if i not in indices]
+        # Sort final interleaved results by score descending
+        selected_candidates = sorted(selected_candidates, key=lambda x: x[0], reverse=True)
 
-        # Filter by content type
-        if content_type:
-            sorted_indices = [
-                i for i in sorted_indices
-                if self.df.iloc[i]['type'].lower() == content_type.lower()
-            ]
-
-        top_indices = sorted_indices[:n]
-
+        # Format output
+        liked_rows = [self.df.iloc[src_idx] for src_idx in indices]
         results = []
-        for i in top_indices:
-            rec_row = self.df.iloc[i]
-            score = sim_scores[i]
-
-            # Find which input title it's most similar to (on-the-fly, one row each)
-            from sklearn.metrics.pairwise import cosine_similarity as cos_sim
-            input_sims = [
-                (self.df.iloc[src_idx]['title'],
-                 float(cos_sim(self.tfidf_matrix[src_idx], self.tfidf_matrix[i])[0][0]))
-                for src_idx in indices
-            ]
-            most_similar_input = max(input_sims, key=lambda x: x[1])
-
+        for score, cand_idx, src_idx in selected_candidates:
+            rec_row = self.df.iloc[cand_idx]
+            liked_title = self.df.iloc[src_idx]['title']
+            
             result = self._format_title(rec_row)
             result['similarity_score'] = round(float(score), 4)
-            result['explanation'] = f"Matches your taste profile (closest to: {most_similar_input[0]})"
+            result['explanation'] = f"Matches your taste profile (closest to: {liked_title})"
+            result['match_breakdown'] = self._get_match_breakdown(liked_rows, rec_row)
             results.append(result)
 
         return results
@@ -802,3 +927,74 @@ class RecommendationEngine:
             return f"Recommended because: {', '.join(reasons)}"
         else:
             return f"Similar content profile (score: {round(float(score), 2)})"
+
+    def get_user_genre_boosts(self, user_id):
+        """
+        Query MongoDB reviews collection to find user's highly rated titles (4 or 5 stars).
+        Collect the genres from those titles, and return a dictionary of genre weights (boost factors).
+        """
+        from database import db_available, reviews_col
+        if not db_available or reviews_col is None or not user_id:
+            return {}
+        
+        try:
+            # Get reviews with rating >= 4 for this user
+            user_ratings = list(reviews_col.find({"user_id": user_id, "rating": {"$gte": 4}}))
+            if not user_ratings:
+                return {}
+            
+            boosted_genres = {}
+            for r in user_ratings:
+                show_id = r.get("show_id")
+                if show_id in self.id_to_idx:
+                    idx = self.id_to_idx[show_id]
+                    row = self.df.iloc[idx]
+                    genres = row.get("genres_list", [])
+                    weight = 1.15 if r.get("rating") == 5 else 1.08
+                    for genre in genres:
+                        genre_lower = genre.lower().strip()
+                        boosted_genres[genre_lower] = max(boosted_genres.get(genre_lower, 1.0), weight)
+            return boosted_genres
+        except Exception as e:
+            print(f">> [WARN] Failed to fetch rating boosts: {e}")
+            return {}
+
+    def _get_match_breakdown(self, source_rows, rec_row):
+        """
+        Compute overlapping attributes between source titles and the recommended title.
+        """
+        profile_genres = set()
+        profile_cast = set()
+        profile_directors = set()
+        profile_countries = set()
+        profile_moods = set()
+        
+        for row in source_rows:
+            profile_genres.update(row.get('genres_list', []))
+            profile_cast.update(row.get('cast_list', [])[:10])
+            if row.get('director') and row.get('director') not in ['Unknown', 'Not Available']:
+                profile_directors.add(row.get('director'))
+            if row.get('primary_country') and row.get('primary_country') not in ['Unknown', 'Not Available']:
+                profile_countries.add(row.get('primary_country'))
+            if row.get('mood'):
+                profile_moods.add(row.get('mood'))
+                
+        rec_genres = set(rec_row.get('genres_list', []))
+        rec_cast = set(rec_row.get('cast_list', [])[:10])
+        rec_director = rec_row.get('director')
+        rec_country = rec_row.get('primary_country')
+        rec_mood = rec_row.get('mood')
+        
+        shared_genres = list(profile_genres.intersection(rec_genres))
+        shared_cast = list(profile_cast.intersection(rec_cast))
+        shared_director = rec_director if rec_director in profile_directors else None
+        shared_country = rec_country if rec_country in profile_countries else None
+        shared_mood = rec_mood if rec_mood in profile_moods else None
+        
+        return {
+            "genres": [g for g in shared_genres if g][:2],
+            "cast": [c for c in shared_cast if c][:2],
+            "director": shared_director if shared_director not in ['Unknown', 'Not Available', None] else None,
+            "country": shared_country if shared_country not in ['Unknown', 'Not Available', None] else None,
+            "mood": shared_mood
+        }

@@ -175,38 +175,101 @@ const API = (() => {
     return request('/api/stats');
   }
 
-  async function getTrending() {
-    return request('/api/trending');
+  async function getTrending(contentType = null) {
+    const params = new URLSearchParams();
+    if (contentType) params.append('content_type', contentType);
+    return request(`/api/trending?${params.toString()}`);
   }
 
-  async function getRecommendations(title, n = 12) {
+  let _clusterData = null;
+  let _clusterDataLoading = null;
+
+  async function loadClusterData() {
+    if (_clusterData) return _clusterData;
+    if (_clusterDataLoading) return _clusterDataLoading;
+
+    _clusterDataLoading = request('/api/clusters').then(data => {
+      _clusterData = data;
+      _clusterDataLoading = null;
+      return _clusterData;
+    }).catch(err => {
+      console.warn('[Galaxy] Could not load cluster data:', err);
+      _clusterDataLoading = null;
+      throw err;
+    });
+
+    return _clusterDataLoading;
+  }
+
+  async function getMedia(showId) {
+    return request(`/api/media/${encodeURIComponent(showId)}`);
+  }
+
+
+  async function getRecommendations(title, n = 12, excludeGenres = [], userId = null, contentType = null) {
+    const body = { title, n_recommendations: n };
+    if (excludeGenres && excludeGenres.length > 0) body.exclude_genres = excludeGenres;
+    if (userId) body.user_id = userId;
+    if (contentType) body.content_type = contentType;
     return request('/api/recommend', {
       method: 'POST',
-      body: JSON.stringify({ title, n_recommendations: n }),
+      body: JSON.stringify(body),
     });
   }
 
-  async function getMultiRecommendations(titles, n = 15) {
+  async function getMultiRecommendations(titles, n = 15, excludeGenres = [], userId = null, contentType = null) {
+    const body = { titles, n_recommendations: n };
+    if (excludeGenres && excludeGenres.length > 0) body.exclude_genres = excludeGenres;
+    if (userId) body.user_id = userId;
+    if (contentType) body.content_type = contentType;
     return request('/api/recommend/multi', {
       method: 'POST',
-      body: JSON.stringify({ titles, n_recommendations: n }),
+      body: JSON.stringify(body),
     });
   }
 
-  async function getGenreRecommendations(genre, mood = null, contentType = null, n = 15) {
+  async function getGenreRecommendations(genre, mood = null, contentType = null, n = 15, excludeGenres = [], userId = null) {
     const body = { genre, n_recommendations: n };
     if (mood) body.mood = mood;
     if (contentType) body.content_type = contentType;
+    if (excludeGenres && excludeGenres.length > 0) body.exclude_genres = excludeGenres;
+    if (userId) body.user_id = userId;
     return request('/api/recommend/genre', {
       method: 'POST',
       body: JSON.stringify(body),
     });
   }
 
-  async function getCastRecommendations(title, n = 12) {
+  async function getCastRecommendations(title, n = 12, excludeGenres = [], userId = null, contentType = null) {
+    const body = { title, n_recommendations: n };
+    if (excludeGenres && excludeGenres.length > 0) body.exclude_genres = excludeGenres;
+    if (userId) body.user_id = userId;
+    if (contentType) body.content_type = contentType;
     return request('/api/recommend/cast', {
       method: 'POST',
-      body: JSON.stringify({ title, n_recommendations: n }),
+      body: JSON.stringify(body),
+    });
+  }
+
+  async function getPersonalRecommendations(userId, limit = 20, excludeGenres = [], contentType = null) {
+    let url = `/api/recommendations/personalized?user_id=${encodeURIComponent(userId)}&limit=${limit}`;
+    if (contentType) url += `&content_type=${encodeURIComponent(contentType)}`;
+    if (excludeGenres && excludeGenres.length > 0) {
+      excludeGenres.forEach(g => {
+        url += `&exclude_genres=${encodeURIComponent(g)}`;
+      });
+    }
+    return request(url);
+  }
+
+  async function getReviews(showId) {
+    return request(`/api/reviews/${encodeURIComponent(showId)}`);
+  }
+
+  async function submitReview(userId, displayName, showId, rating, reviewText) {
+    return request('/api/reviews/submit', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId, displayName, show_id: showId, rating, review_text: reviewText }),
     });
   }
 
@@ -323,6 +386,9 @@ const API = (() => {
     getMultiRecommendations,
     getGenreRecommendations,
     getCastRecommendations,
+    loadClusterData,
+    getMedia,
+
     // New MongoDB linked methods
     authRegister,
     authLogin,
@@ -339,6 +405,9 @@ const API = (() => {
     updateCatalogItem,
     deleteCatalogItem,
     debounce,
+    getPersonalRecommendations,
+    getReviews,
+    submitReview,
   };
 })();
 

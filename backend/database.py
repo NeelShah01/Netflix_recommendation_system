@@ -18,6 +18,7 @@ try:
     users_col = db["users"]
     watchlists_col = db["watchlists"]
     watched_col = db["watched"]
+    reviews_col = db["reviews"]
     db_available = True
     print(f">> Connected to MongoDB at {MONGO_URI} (db: smartrec)")
 except (ServerSelectionTimeoutError, Exception) as e:
@@ -26,5 +27,6 @@ except (ServerSelectionTimeoutError, Exception) as e:
     users_col = None
     watchlists_col = None
     watched_col = None
+    reviews_col = None
     db_available = False
     print(f">> [WARN] MongoDB not reachable at {MONGO_URI}. Server will start in fail-safe LOCAL storage fallback mode.")

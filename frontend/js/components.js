@@ -41,6 +41,35 @@ const Components = (() => {
         </button>
       </div>` : '';
 
+    // Build match breakdown chips if available
+    let breakdownHtml = '';
+    if (item.match_breakdown) {
+      const mb = item.match_breakdown;
+      const chips = [];
+      if (mb.genres && mb.genres.length > 0) {
+        chips.push(`<span class="breakdown-tag font-accent">🏷️ ${escapeHtml(mb.genres[0])}</span>`);
+      }
+      if (mb.cast && mb.cast.length > 0) {
+        chips.push(`<span class="breakdown-tag">👥 ${escapeHtml(mb.cast[0].split(' ')[0])}</span>`);
+      }
+      if (mb.director) {
+        chips.push(`<span class="breakdown-tag">🎬 ${escapeHtml(mb.director.split(' ')[0])}</span>`);
+      }
+      if (mb.mood) {
+        const moodEmojis = {
+          'feel-good': '😊',
+          'intense': '🔥',
+          'dark': '🌑',
+          'thought-provoking': '🧠'
+        };
+        const moodLabel = mb.mood.charAt(0).toUpperCase() + mb.mood.slice(1);
+        chips.push(`<span class="breakdown-tag">${moodEmojis[mb.mood] || '✨'} ${escapeHtml(moodLabel)}</span>`);
+      }
+      if (chips.length > 0) {
+        breakdownHtml = `<div class="card-breakdown-wrap">${chips.join('')}</div>`;
+      }
+    }
+
     card.innerHTML = `
       <div class="card-poster" style="background: linear-gradient(135deg, hsl(${hue}, 70%, 25%) 0%, hsl(${(hue + 40) % 360}, 60%, 15%) 100%);">
         <span class="card-poster-icon">${typeIcon}</span>
@@ -59,6 +88,7 @@ const Components = (() => {
           ${duration ? `<span class="card-dot">•</span><span class="card-duration">${duration}</span>` : ''}
         </div>
         <div class="card-genres">${genreChips}</div>
+        ${breakdownHtml}
       </div>
     `;
 
@@ -101,6 +131,24 @@ const Components = (() => {
         document.dispatchEvent(new CustomEvent('openDetail', { detail: item }));
       }
     });
+
+    // Asynchronously fetch poster from backend media proxy
+    if (item.show_id && typeof API !== 'undefined') {
+      API.getMedia(item.show_id).then(media => {
+        if (media && media.poster_path) {
+          const posterEl = card.querySelector('.card-poster');
+          if (posterEl) {
+            posterEl.style.backgroundImage = `url(${media.poster_path})`;
+            posterEl.style.backgroundSize = 'cover';
+            posterEl.style.backgroundPosition = 'center';
+            
+            // Hide the default emoji icon
+            const iconEl = posterEl.querySelector('.card-poster-icon');
+            if (iconEl) iconEl.style.display = 'none';
+          }
+        }
+      }).catch(() => {});
+    }
 
     return card;
   }
@@ -364,12 +412,39 @@ const Components = (() => {
     // Clear previous similar
     $('modalSimilar').innerHTML = '';
 
+    // Reset TMDB fields
+    $('modalPosterSide')?.classList.add('hidden');
+    $('modalPosterImg')?.setAttribute('src', '');
+    $('modalTrailerBtn')?.classList.add('hidden');
+    
+    const tmdbRating = $('modalTmdbRating');
+    if (tmdbRating) {
+      tmdbRating.textContent = '';
+      tmdbRating.classList.add('hidden');
+    }
+
     // Set hero gradient based on title
     const hue = hashString(item.title || '') % 360;
     const hero = document.querySelector('.modal-hero');
     if (hero) {
       hero.style.background = `linear-gradient(135deg, hsl(${hue}, 70%, 20%) 0%, hsl(${(hue + 50) % 360}, 60%, 10%) 100%)`;
     }
+
+    // Reset community reviews UI
+    const badge = $('modalAverageRatingBadge');
+    if (badge) badge.classList.add('hidden');
+    
+    const textarea = $('modalReviewText');
+    if (textarea) textarea.value = '';
+    
+    const starsInput = $('starRatingInput');
+    if (starsInput) {
+      starsInput.dataset.rating = '0';
+      starsInput.querySelectorAll('.star-icon').forEach(s => s.classList.remove('active'));
+    }
+    
+    const list = $('modalReviewsList');
+    if (list) list.innerHTML = '<div class="reviews-loader">Loading reviews...</div>';
   }
 
   /* ═══════════════════════════════════════════════════
@@ -626,6 +701,34 @@ const Components = (() => {
     return row;
   }
 
+  /* ═══════════════════════════════════════════════════
+     REVIEW CARD
+     ═══════════════════════════════════════════════════ */
+  function reviewCard(review) {
+    const card = document.createElement('div');
+    card.className = 'review-card animate-fade-up';
+    
+    // Format timestamp
+    let dateStr = 'Just now';
+    if (review.timestamp) {
+      const date = new Date(review.timestamp * 1000);
+      dateStr = date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+    
+    // Build star rating icons
+    const starsHtml = '★'.repeat(review.rating) + '☆'.repeat(5 - review.rating);
+    
+    card.innerHTML = `
+      <div class="review-card-header">
+        <span class="review-author-name">${escapeHtml(review.displayName || 'Anonymous')}</span>
+        <span class="review-rating">${starsHtml}</span>
+        <span class="review-date">${dateStr}</span>
+      </div>
+      ${review.review_text ? `<p class="review-text">${escapeHtml(review.review_text)}</p>` : '<p class="review-text empty-review">Rated only.</p>'}
+    `;
+    return card;
+  }
+
   /* ───── Expose ───── */
 
   return {
@@ -647,5 +750,6 @@ const Components = (() => {
     watchlistPickerDropdown,
     watchedItemCard,
     watchlistItemRow,
+    reviewCard,
   };
 })();

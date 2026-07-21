@@ -48,6 +48,15 @@
         <div class="toggle-indicator"></div>
       </div>
 
+      <!-- Preferences Button -->
+      <button id="navPreferencesBtn" class="nav-preferences-btn" title="Filter Preferences">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+          <circle cx="12" cy="12" r="3" />
+          <path
+            d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+        </svg>
+      </button>
+
       <!-- Profile Button -->
       <button id="navProfileBtn" class="nav-profile-btn" title="Sign In" aria-label="Profile">
         <span id="navAvatarDisplay" class="nav-avatar-display">
@@ -59,6 +68,26 @@
     </div>
   </nav>
 
+  <!-- ═══════════════════ PREFERENCES PANEL (SLIDEOUT) ═══════════════════ -->
+  <div id="preferencesPanel" class="preferences-panel hidden">
+    <div class="preferences-panel-inner">
+      <div class="preferences-header">
+        <h3>⚙️ Filtering & Exclusions</h3>
+        <p>Exclude genres from all recommended content & home screen</p>
+      </div>
+      <div class="preferences-section">
+        <span class="pref-label">Exclude Genres:</span>
+        <div id="excludeGenresChips" class="exclude-genres-chips">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+      <div class="preferences-footer">
+        <button id="clearPreferencesBtn" class="btn btn-ghost">Reset Filters</button>
+        <button id="closePreferencesBtn" class="btn btn-primary">Apply Exclusions</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════ HERO SECTION ═══════════════════ -->
   <section id="heroSection" class="hero">
     <canvas id="particleCanvas" class="particle-canvas"></canvas>
@@ -69,10 +98,7 @@
         Discover Your Next
         <span class="gradient-text">Favorite Watch</span>
       </h1>
-      <p class="hero-subtitle">
-        Powered by machine learning on 8,000+ Netflix titles. Get personalized recommendations by mood, genre, cast, or
-        titles you love.
-      </p>
+
       <div class="hero-actions">
         <button id="heroExploreBtn" class="btn btn-primary btn-glow">
           <span>Explore Now</span>
@@ -190,6 +216,15 @@
     </div>
   </section>
 
+  <!-- ═══════════════════ RECOMMENDED FOR YOU ═══════════════════ -->
+  <section id="forYouSection" class="section for-you-section hidden">
+    <div class="section-container">
+      <div id="forYouCarousel">
+        <!-- Populated dynamically when logged in -->
+      </div>
+    </div>
+  </section>
+
   <!-- ═══════════════════ TRENDING ═══════════════════ -->
   <section id="trendingSection" class="section trending-section">
     <div class="section-container">
@@ -199,8 +234,10 @@
     </div>
   </section>
 
+
   <!-- ═══════════════════ STATISTICS ═══════════════════ -->
   <section id="statsSection" class="section stats-section">
+
     <div class="section-container">
       <h2 class="section-title center">
         <span class="title-accent">✦</span> Dataset Insights
@@ -232,6 +269,7 @@
             <span id="modalType" class="modal-badge type-badge"></span>
             <span id="modalRating" class="modal-badge rating-badge"></span>
             <span id="modalYear" class="modal-badge year-badge"></span>
+            <span id="modalTmdbRating" class="modal-badge tmdb-rating-badge hidden"></span>
           </div>
           <h2 id="modalTitle" class="modal-title"></h2>
           <p id="modalDuration" class="modal-duration"></p>
@@ -239,29 +277,39 @@
       </div>
 
       <div class="modal-body">
-        <p id="modalDescription" class="modal-description"></p>
+        <div class="modal-body-layout">
+          <!-- Poster Column -->
+          <div id="modalPosterSide" class="modal-poster-side hidden">
+            <img id="modalPosterImg" src="" alt="Title Poster" />
+          </div>
 
-        <div class="modal-meta-grid">
-          <div class="modal-meta-item" id="modalDirectorWrap">
-            <span class="meta-label">Director</span>
-            <span id="modalDirector" class="meta-value"></span>
-          </div>
-          <div class="modal-meta-item" id="modalCastWrap">
-            <span class="meta-label">Cast</span>
-            <span id="modalCast" class="meta-value"></span>
-          </div>
-          <div class="modal-meta-item" id="modalCountryWrap">
-            <span class="meta-label">Country</span>
-            <span id="modalCountry" class="meta-value"></span>
-          </div>
-          <div class="modal-meta-item" id="modalGenresWrap">
-            <span class="meta-label">Genres</span>
-            <span id="modalGenres" class="meta-value"></span>
+          <!-- Metadata Column -->
+          <div class="modal-info-side">
+            <p id="modalDescription" class="modal-description"></p>
+
+            <div class="modal-meta-grid">
+              <div class="modal-meta-item" id="modalDirectorWrap">
+                <span class="meta-label">Director</span>
+                <span id="modalDirector" class="meta-value"></span>
+              </div>
+              <div class="modal-meta-item" id="modalCastWrap">
+                <span class="meta-label">Cast</span>
+                <span id="modalCast" class="meta-value"></span>
+              </div>
+              <div class="modal-meta-item" id="modalCountryWrap">
+                <span class="meta-label">Country</span>
+                <span id="modalCountry" class="meta-value"></span>
+              </div>
+              <div class="modal-meta-item" id="modalGenresWrap">
+                <span class="meta-label">Genres</span>
+                <span id="modalGenres" class="meta-value"></span>
+              </div>
+            </div>
+
+            <!-- User Actions: Add to Watchlist / Mark as Watched -->
+            <div id="modalUserActions" class="modal-user-actions"></div>
           </div>
         </div>
-
-        <!-- User Actions: Add to Watchlist / Mark as Watched -->
-        <div id="modalUserActions" class="modal-user-actions"></div>
 
         <div class="modal-actions">
           <button id="modalRecommendBtn" class="btn btn-primary btn-glow">
@@ -278,6 +326,52 @@
             </svg>
             By Same Cast
           </button>
+          <button id="modalTrailerBtn" class="btn btn-glass btn-trailer hidden">
+            <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            Watch Trailer
+          </button>
+        </div>
+
+
+        <!-- Ratings & Reviews Section -->
+        <div class="modal-reviews-section">
+          <h3 class="reviews-section-title">
+            <span>Community Ratings & Reviews</span>
+            <span id="modalAverageRatingBadge" class="avg-rating-badge hidden">⭐ 0.0 (0 reviews)</span>
+          </h3>
+
+          <!-- Form to submit a review (Only visible if user is logged in) -->
+          <div id="modalReviewFormContainer" class="modal-review-form-container hidden">
+            <h4>Leave your Rating & Review:</h4>
+            <form id="modalReviewForm" class="review-form">
+              <div class="rating-input-wrap">
+                <span class="rating-label">Rating:</span>
+                <div class="star-rating-input" id="starRatingInput">
+                  <span class="star-icon" data-value="1">★</span>
+                  <span class="star-icon" data-value="2">★</span>
+                  <span class="star-icon" data-value="3">★</span>
+                  <span class="star-icon" data-value="4">★</span>
+                  <span class="star-icon" data-value="5">★</span>
+                </div>
+              </div>
+              <textarea id="modalReviewText" class="review-textarea"
+                placeholder="Write a quick micro-review (max 250 chars, optional)..." maxLength="250"></textarea>
+              <div class="review-form-actions">
+                <button type="submit" id="submitReviewBtn" class="btn btn-primary btn-sm">Submit Review</button>
+              </div>
+            </form>
+          </div>
+
+          <div id="modalReviewAuthTip" class="review-auth-tip">
+            <p>Please <a href="#" id="reviewLoginLink">sign in</a> to leave a rating and micro-review.</p>
+          </div>
+
+          <!-- List of Reviews -->
+          <div id="modalReviewsList" class="modal-reviews-list">
+            <!-- Dynamically populated -->
+          </div>
         </div>
 
         <div id="modalSimilar" class="modal-similar">
@@ -444,8 +538,19 @@
     </div>
   </aside>
 
+  <!-- ═══════════════════ TRAILER MODAL ═══════════════════ -->
+  <div id="trailerModal" class="trailer-modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="trailer-modal-container">
+      <button id="trailerModalClose" class="trailer-modal-close" aria-label="Close trailer">&times;</button>
+      <div class="trailer-video-wrapper">
+        <iframe id="trailerPlayer" src="" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════ TOAST NOTIFICATIONS ═══════════════════ -->
   <div id="toastContainer" class="toast-container"></div>
+
 
   <!-- ═══════════════════ BACK TO TOP ═══════════════════ -->
   <button id="backToTop" class="back-to-top" aria-label="Back to top">

@@ -31,14 +31,14 @@ const WatchlistManager = (() => {
       cache.watched = [];
       return;
     }
-    
+
     cache.loading = true;
     try {
       const [wlData, watchedData] = await Promise.all([
         API.getWatchlists(user.uid),
         API.getWatched(user.uid)
       ]);
-      
+
       cache.lists = wlData || {};
       cache.watched = watchedData || [];
       console.log('[WatchlistManager] Synced data from MongoDB', cache);
@@ -78,6 +78,7 @@ const WatchlistManager = (() => {
       await API.createWatchlist(user.uid, trimmed);
       // Update cache
       cache.lists[trimmed] = [];
+      document.dispatchEvent(new CustomEvent('watchlistUpdated'));
       return { name: trimmed, items: [] };
     } catch (err) {
       return { error: err.message || 'Failed to create watchlist.' };
@@ -92,6 +93,7 @@ const WatchlistManager = (() => {
     try {
       await API.deleteWatchlist(user.uid, name);
       delete cache.lists[name];
+      document.dispatchEvent(new CustomEvent('watchlistUpdated'));
       return true;
     } catch (err) {
       console.error('[Watchlist] Delete list error:', err);
@@ -117,6 +119,7 @@ const WatchlistManager = (() => {
         title: item.title,
         type: item.type
       });
+      document.dispatchEvent(new CustomEvent('watchlistUpdated'));
       return { added: true };
     } catch (err) {
       if (err.message.includes('Already')) return { duplicate: true };
@@ -135,6 +138,7 @@ const WatchlistManager = (() => {
       if (cache.lists[listName]) {
         cache.lists[listName] = cache.lists[listName].filter(i => i.show_id !== showId);
       }
+      document.dispatchEvent(new CustomEvent('watchlistUpdated'));
       return true;
     } catch (err) {
       console.error('[Watchlist] Remove item error:', err);
@@ -187,6 +191,7 @@ const WatchlistManager = (() => {
         type: item.type,
         watchedAt: Date.now()
       });
+      document.dispatchEvent(new CustomEvent('watchlistUpdated'));
       return { added: true };
     } catch (err) {
       return { error: err.message || 'Failed to mark watched.' };
@@ -206,6 +211,7 @@ const WatchlistManager = (() => {
       await API.removeWatched(user.uid, showId, item.title, item.type);
       // Update cache
       cache.watched = cache.watched.filter(i => i.show_id !== showId);
+      document.dispatchEvent(new CustomEvent('watchlistUpdated'));
       return true;
     } catch (err) {
       console.error('[Watchlist] Unmark watched error:', err);

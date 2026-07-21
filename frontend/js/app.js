@@ -18,6 +18,7 @@
     genres: [],
     stats: null,
     sidebarView: 'profile',   // 'profile' | 'watchlists' | 'watched-movies' | 'watched-tv'
+    excludeGenres: [],
   };
 
   /* ═══════════════════ DOM REFS ═══════════════════ */
@@ -26,13 +27,16 @@
 
   /* ═══════════════════ INIT ═══════════════════ */
   document.addEventListener('DOMContentLoaded', () => {
+    loadStoredExclusions();
     initParticles();
     initNavScroll();
     initSearch();
     initContentTypeToggle();
     initMoodSelector();
     initMultiSelect();
+    initPreferencesPanel();
     initModal();
+    initTrailerModal();
     initBackToTop();
     initFooterLinks();
     loadInitialData();
@@ -274,10 +278,8 @@
           indicator.style.left = `${btn.offsetLeft}px`;
         }
 
-        // Re-trigger active genre/mood if any
-        if (state.activeGenre) {
-          loadGenreRecommendations(state.activeGenre, state.activeMood);
-        }
+        // Re-trigger all recommendations
+        refreshRecommendations();
       });
     });
 
@@ -415,7 +417,13 @@
       container.appendChild(Components.skeletonCards(8));
 
       try {
-        const results = await API.getMultiRecommendations(state.multiSelectTitles);
+        const results = await API.getMultiRecommendations(
+          state.multiSelectTitles,
+          15,
+          state.excludeGenres,
+          Auth.isLoggedIn() ? Auth.getUser().uid : null,
+          state.contentType || null
+        );
         const recs = normalizeRecommendationResults(results);
         container.innerHTML = '';
 
@@ -483,7 +491,13 @@
       `;
 
       try {
-        const results = await API.getRecommendations(title);
+        const results = await API.getRecommendations(
+          title,
+          12,
+          state.excludeGenres,
+          Auth.isLoggedIn() ? Auth.getUser().uid : null,
+          state.contentType || null
+        );
         const recs = normalizeRecommendationResults(results);
         similarDiv.innerHTML = '';
 
@@ -513,7 +527,13 @@
       `;
 
       try {
-        const results = await API.getCastRecommendations(title);
+        const results = await API.getCastRecommendations(
+          title,
+          12,
+          state.excludeGenres,
+          Auth.isLoggedIn() ? Auth.getUser().uid : null,
+          state.contentType || null
+        );
         const recs = normalizeRecommendationResults(results);
         similarDiv.innerHTML = '';
 
@@ -524,6 +544,64 @@
       } catch (err) {
         similarDiv.innerHTML = `<p class="modal-error">Could not load cast recommendations.</p>`;
       }
+    });
+
+    // Star rating input clicks
+    const starContainer = $('starRatingInput');
+    if (starContainer) {
+      const stars = starContainer.querySelectorAll('.star-icon');
+      stars.forEach(star => {
+        star.addEventListener('click', (e) => {
+          const val = parseInt(e.target.dataset.value);
+          starContainer.dataset.rating = val;
+          stars.forEach((s, idx) => {
+            s.classList.toggle('active', idx < val);
+          });
+        });
+      });
+    }
+
+    // Submit review form
+    const reviewForm = $('modalReviewForm');
+    reviewForm?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!state.currentModalItem) return;
+      const user = Auth.getUser();
+      if (!user) {
+        Components.toast("Please sign in to leave a review.", "warning");
+        return;
+      }
+      
+      const rating = parseInt($('starRatingInput').dataset.rating || '0');
+      if (rating === 0) {
+        Components.toast("Please select a star rating first.", "warning");
+        return;
+      }
+      
+      const reviewText = $('modalReviewText').value.trim();
+      const showId = state.currentModalItem.show_id;
+      const displayName = user.displayName || user.email || 'User';
+      
+      const submitBtn = $('submitReviewBtn');
+      if (submitBtn) submitBtn.disabled = true;
+      
+      try {
+        await API.submitReview(user.uid, displayName, showId, rating, reviewText);
+        Components.toast("Review submitted successfully!", "success");
+        await loadModalReviews(showId);
+      } catch (err) {
+        Components.toast("Failed to submit review.", "error");
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    });
+
+    // Review login link click
+    const reviewLoginLink = $('reviewLoginLink');
+    reviewLoginLink?.addEventListener('click', (e) => {
+      e.preventDefault();
+      closeModal();
+      openLoginModal();
     });
   }
 
@@ -545,6 +623,55 @@
     updateModalUserActions(fullItem);
     modal.classList.add('open');
     document.body.style.overflow = 'hidden';
+
+    // Fetch and load community reviews
+    if (fullItem.show_id) {
+      loadModalReviews(fullItem.show_id);
+    }
+
+    // Fetch rich media (posters, ratings, trailers) from TMDB dynamically
+    if (fullItem.show_id) {
+      API.getMedia(fullItem.show_id).then(media => {
+        if (!media || state.currentModalItem?.show_id !== fullItem.show_id) return;
+        
+        // 1. Show TMDB Poster if resolved
+        const posterSide = $('modalPosterSide');
+        const posterImg = $('modalPosterImg');
+        if (media.poster_path && posterSide && posterImg) {
+          posterImg.src = media.poster_path;
+          posterSide.classList.remove('hidden');
+        }
+
+        // 2. Add TMDB score badge
+        const tmdbRating = $('modalTmdbRating');
+        if (media.vote_average != null && tmdbRating) {
+          tmdbRating.textContent = `⭐ TMDB: ${media.vote_average}`;
+          tmdbRating.classList.remove('hidden');
+        }
+
+        // 3. Render backdrop image in the modal header
+        const hero = document.querySelector('.modal-hero');
+        if (media.backdrop_path && hero) {
+          hero.style.background = `linear-gradient(to bottom, rgba(10, 10, 15, 0.4), rgba(10, 10, 15, 0.9)), url(${media.backdrop_path}) center/cover no-repeat`;
+        }
+
+        // 4. Wire trailer play button if available
+        const trailerBtn = $('modalTrailerBtn');
+        if (media.trailer_url && trailerBtn) {
+          // Replace button with clean clone to clear previous listeners
+          const newTrailerBtn = trailerBtn.cloneNode(true);
+          newTrailerBtn.classList.remove('hidden');
+          trailerBtn.parentNode.replaceChild(newTrailerBtn, trailerBtn);
+
+          newTrailerBtn.addEventListener('click', () => {
+            const watchUrl = media.trailer_url.replace('/embed/', '/watch?v=');
+            window.open(watchUrl, '_blank');
+          });
+        }
+      }).catch(err => {
+        console.warn('Failed to load TMDB details:', err);
+      });
+    }
   }
 
   function updateModalUserActions(item) {
@@ -589,6 +716,11 @@
     modal.classList.remove('open');
     document.body.style.overflow = '';
     state.currentModalItem = null;
+
+    // Clear and hide trailer video player
+    const player = $('trailerPlayer');
+    if (player) player.src = '';
+    $('trailerModal')?.classList.add('hidden');
   }
 
   /* ═══════════════════ BACK TO TOP ═══════════════════ */
@@ -716,7 +848,14 @@
     container.appendChild(Components.skeletonCards(8));
 
     try {
-      const results = await API.getGenreRecommendations(genre, mood, state.contentType || null);
+      const results = await API.getGenreRecommendations(
+        genre,
+        mood,
+        state.contentType || null,
+        15,
+        state.excludeGenres,
+        Auth.isLoggedIn() ? Auth.getUser().uid : null
+      );
       const recs = normalizeRecommendationResults(results);
 
       container.innerHTML = '';
@@ -819,9 +958,21 @@
 
   /* ═══════════════════ AUTH ═══════════════════ */
   function initAuth() {
-    // Update navbar whenever auth state changes
-    Auth.onChange(updateNavProfile);
+    // Update navbar and load personal recommendations whenever auth state changes
+    Auth.onChange((user) => {
+      updateNavProfile(user);
+      handlePersonalRecommendations(user);
+    });
     updateNavProfile(Auth.getUser());
+    handlePersonalRecommendations(Auth.getUser());
+
+    // Listen for watchlist mutations to reload recommendations
+    document.addEventListener('watchlistUpdated', () => {
+      const user = Auth.getUser();
+      if (user) {
+        handlePersonalRecommendations(user);
+      }
+    });
 
     // Login Modal Open
     $('navProfileBtn')?.addEventListener('click', () => {
@@ -1273,6 +1424,248 @@
       grid.appendChild(Components.watchedItemCard(item, () => renderSidebarContent()));
     });
     container.appendChild(grid);
+  }
+
+
+
+  function playTrailer(url) {
+    const trailerModal = $('trailerModal');
+    const player = $('trailerPlayer');
+    if (!trailerModal || !player) return;
+    
+    const autoplayUrl = url.includes('?') ? `${url}&autoplay=1` : `${url}?autoplay=1`;
+    player.src = autoplayUrl;
+    trailerModal.classList.remove('hidden');
+  }
+
+  function initTrailerModal() {
+    const trailerModal = $('trailerModal');
+    const closeBtn = $('trailerModalClose');
+    const player = $('trailerPlayer');
+    
+    if (!trailerModal || !closeBtn || !player) return;
+    
+    const closeTrailer = () => {
+      player.src = '';
+      trailerModal.classList.add('hidden');
+    };
+    
+    closeBtn.addEventListener('click', closeTrailer);
+    trailerModal.addEventListener('click', (e) => {
+      if (e.target === trailerModal) closeTrailer();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !trailerModal.classList.contains('hidden')) {
+        closeTrailer();
+        e.stopPropagation();
+      }
+    });
+  }
+
+  /* ═══════════════════ RECOMMENDATIONS EXCLUSIONS & PERSONALIZATION ═══════════════════ */
+
+  function loadStoredExclusions() {
+    try {
+      const stored = localStorage.getItem('smartrec_exclusions');
+      if (stored) {
+        state.excludeGenres = JSON.parse(stored);
+      }
+    } catch (e) {
+      console.warn("Failed to load stored exclusions:", e);
+    }
+  }
+
+  function initPreferencesPanel() {
+    const panel = $('preferencesPanel');
+    const toggleBtn = $('navPreferencesBtn');
+    const closeBtn = $('closePreferencesBtn');
+    const clearBtn = $('clearPreferencesBtn');
+    const chipsContainer = $('excludeGenresChips');
+
+    if (!panel || !toggleBtn || !closeBtn || !clearBtn || !chipsContainer) return;
+
+    toggleBtn.addEventListener('click', () => {
+      const isHidden = panel.classList.contains('hidden');
+      if (isHidden) {
+        panel.classList.remove('hidden');
+        renderPreferencesChips();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        panel.classList.add('hidden');
+      }
+    });
+
+    closeBtn.addEventListener('click', () => {
+      panel.classList.add('hidden');
+      applyExclusions();
+    });
+
+    clearBtn.addEventListener('click', () => {
+      state.excludeGenres = [];
+      const checkboxes = chipsContainer.querySelectorAll('input[type="checkbox"]');
+      checkboxes.forEach(cb => cb.checked = false);
+      chipsContainer.querySelectorAll('.pref-chip-label').forEach(label => label.classList.remove('active'));
+      applyExclusions();
+    });
+
+    function renderPreferencesChips() {
+      if (!state.genres || state.genres.length === 0) {
+        API.getGenres().then(genresList => {
+          state.genres = genresList;
+          populateChips();
+        });
+      } else {
+        populateChips();
+      }
+    }
+
+    function populateChips() {
+      chipsContainer.innerHTML = '';
+      state.genres.forEach(genre => {
+        const isExcluded = state.excludeGenres.includes(genre);
+        const label = document.createElement('label');
+        label.className = `pref-chip-label ${isExcluded ? 'active' : ''}`;
+        
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = genre;
+        checkbox.checked = isExcluded;
+        
+        checkbox.addEventListener('change', () => {
+          label.classList.toggle('active', checkbox.checked);
+        });
+
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(genre));
+        chipsContainer.appendChild(label);
+      });
+    }
+
+    function applyExclusions() {
+      const selected = [];
+      const checkedInputs = chipsContainer.querySelectorAll('input[type="checkbox"]:checked');
+      checkedInputs.forEach(input => selected.push(input.value));
+      state.excludeGenres = selected;
+      
+      localStorage.setItem('smartrec_exclusions', JSON.stringify(selected));
+      refreshRecommendations();
+    }
+  }
+
+  function refreshRecommendations() {
+    // 1. Refresh Trending Carousel
+    API.getTrending(state.contentType || null).then(trending => {
+      const trendingItems = normalizeRecommendationResults(trending);
+      renderTrending(trendingItems);
+    }).catch(err => console.warn("Failed to refresh trending:", err));
+
+    // 2. Refresh Genre/Mood Carousel
+    if (state.activeGenre || state.activeMood) {
+      loadGenreRecommendations(state.activeGenre, state.activeMood);
+    }
+
+    // 3. Refresh Personalized Carousel
+    const user = Auth.getUser();
+    if (user) {
+      handlePersonalRecommendations(user);
+    }
+  }
+
+  async function handlePersonalRecommendations(user) {
+    const section = $('forYouSection');
+    const container = $('forYouCarousel');
+    if (!section || !container) return;
+
+    if (!user) {
+      section.classList.add('hidden');
+      container.innerHTML = '';
+      return;
+    }
+
+    section.classList.remove('hidden');
+    container.innerHTML = `
+      <div class="carousel-header">
+        <h2 class="carousel-title"><span class="title-accent">✦</span> Recommended For You</h2>
+      </div>
+      <div class="carousel-track-wrapper">
+        <div class="carousel-track">${Array.from({ length: 6 }, () => `
+          <div class="content-card skeleton-card">
+            <div class="skeleton skeleton-poster"></div>
+            <div class="card-info"><div class="skeleton skeleton-text"></div></div>
+          </div>
+        `).join('')}</div>
+      </div>
+    `;
+
+    try {
+      const res = await API.getPersonalRecommendations(user.uid, 20, state.excludeGenres, state.contentType || null);
+      
+      const currentUser = Auth.getUser();
+      if (!currentUser || currentUser.uid !== user.uid) return;
+
+      if (res && res.count > 0) {
+        container.innerHTML = '';
+        const recCarousel = Components.carousel("Recommended For You 🌟", res.results, {
+          id: "forYouCarouselRow",
+          subtitle: "Based on your watch history & list"
+        });
+        container.appendChild(recCarousel);
+      } else {
+        container.innerHTML = `
+          <div class="carousel-header">
+            <h2 class="carousel-title"><span class="title-accent">✦</span> Recommended For You</h2>
+          </div>
+          <div class="personalized-fallback-card">
+            <div class="fallback-icon">🌟</div>
+            <h3>Your Personalized Feed is Ready!</h3>
+            <p>Add titles to your watchlist or mark them as watched, and we'll curate recommendations tailored to your taste right here.</p>
+          </div>
+        `;
+      }
+    } catch (err) {
+      console.warn("Failed to load personalized recommendations:", err);
+      container.innerHTML = `<p class="carousel-error">Could not load personalized recommendations.</p>`;
+    }
+  }
+
+  /* ═══════════════════ RATINGS & REVIEWS ═══════════════════ */
+
+  async function loadModalReviews(showId) {
+    const list = $('modalReviewsList');
+    const badge = $('modalAverageRatingBadge');
+    const formContainer = $('modalReviewFormContainer');
+    const authTip = $('modalReviewAuthTip');
+
+    if (!list || !badge) return;
+
+    // Toggle Form visibility based on login state
+    if (Auth.isLoggedIn()) {
+      formContainer?.classList.remove('hidden');
+      authTip?.classList.add('hidden');
+    } else {
+      formContainer?.classList.add('hidden');
+      authTip?.classList.remove('hidden');
+    }
+
+    try {
+      const res = await API.getReviews(showId);
+      if (state.currentModalItem?.show_id !== showId) return;
+
+      if (res.review_count > 0) {
+        badge.textContent = `⭐ ${res.average_rating} (${res.review_count} review${res.review_count > 1 ? 's' : ''})`;
+        badge.classList.remove('hidden');
+        list.innerHTML = '';
+        res.reviews.forEach(r => {
+          list.appendChild(Components.reviewCard(r));
+        });
+      } else {
+        badge.classList.add('hidden');
+        list.innerHTML = '<div class="no-reviews-placeholder">Be the first to rate and review this title!</div>';
+      }
+    } catch (err) {
+      console.warn("Failed to load reviews:", err);
+      list.innerHTML = '<div class="modal-error">Could not load reviews.</div>';
+    }
   }
 
 })();
