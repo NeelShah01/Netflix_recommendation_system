@@ -131,10 +131,15 @@ async def add_timing_header(request: Request, call_next):
         print(f"[TIMING] {method} {path} -> {elapsed_ms:.2f}ms  [{status}]")
     return response
 
-# Serve static frontend files
+# Serve static frontend files (CSS and JS) if available
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend')
 if os.path.exists(FRONTEND_DIR):
-    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+    css_dir = os.path.join(FRONTEND_DIR, 'css')
+    js_dir = os.path.join(FRONTEND_DIR, 'js')
+    if os.path.exists(css_dir):
+        app.mount("/css", StaticFiles(directory=css_dir), name="css")
+    if os.path.exists(js_dir):
+        app.mount("/js", StaticFiles(directory=js_dir), name="js")
 
 
 # ──────────────────────────────────────────────
@@ -143,11 +148,14 @@ if os.path.exists(FRONTEND_DIR):
 
 @app.get("/")
 async def root():
-    """Serve the frontend index.html."""
-    index_path = os.path.join(FRONTEND_DIR, 'index.html')
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
-    return {"message": "Smart Content Recommender API", "docs": "/docs"}
+    """API Root — Return service status and documentation link."""
+    return {
+        "status": "online",
+        "service": "Smart Content Recommender API",
+        "docs": "/docs",
+        "health": "/api/health"
+    }
+
 
 
 @app.get("/api/health")
