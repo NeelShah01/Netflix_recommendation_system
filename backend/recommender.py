@@ -106,10 +106,18 @@ class RecommendationEngine:
             }
             # Build all three search indexes (bisect, token, trigram)
             self._build_search_indexes(self.df, use_enumerate=True)
-            # Build ANN index for fast cosine similarity in recommendations
-            self._build_ann_index(self.tfidf_matrix)
             self._loaded = True
             print(f"   [OK] Preloaded {len(self.df)} titles from local files. Server is starting immediately!")
+
+            # Build ANN index in background thread so server port binds in <1s on Render free tier
+            import threading
+            def bg_ann():
+                try:
+                    self._build_ann_index(self.tfidf_matrix)
+                except Exception as ann_err:
+                    print(f"   [WARN] Background ANN index build skipped: {ann_err}")
+            threading.Thread(target=bg_ann, name="ANNIndexThread", daemon=True).start()
+
         except Exception as err:
             print(f"   [CRITICAL] Failed to preload local files: {err}")
 
