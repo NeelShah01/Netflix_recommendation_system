@@ -10,9 +10,13 @@
  */
 
 const API = (() => {
-  const BASE_URL = (typeof window !== 'undefined' && window.location && window.location.origin && !window.location.origin.startsWith('file') && !window.location.origin.includes('5500'))
-    ? window.location.origin
-    : 'http://127.0.0.1:8000';
+  const RENDER_BACKEND_URL = 'https://smart-content-recommender.onrender.com';
+
+  const BASE_URL = (typeof window !== 'undefined' && window.location)
+  ? (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      ? 'http://127.0.0.1:8000'
+      : RENDER_BACKEND_URL)
+  : 'http://127.0.0.1:8000';
 
   const cache = new Map();
   const CACHE_TTL = 5 * 60 * 1000; // 5 minutes

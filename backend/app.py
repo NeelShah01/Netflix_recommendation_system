@@ -10,6 +10,7 @@ API Documentation: http://localhost:8000/docs
 """
 
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
@@ -91,7 +92,13 @@ app = FastAPI(
 # CORS — allow frontend to communicate with backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5500",
+        "http://127.0.0.1:8000",
+        "https://your-frontend-app.vercel.app", # Add your deployed frontend URL here
+        "https://*.vercel.app",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -105,6 +112,23 @@ async def add_no_cache_headers(request: Request, call_next):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    return response
+
+
+# Request timing middleware — measures wall-clock latency for every API call.
+# Attaches X-Process-Time-Ms header so the browser DevTools Network tab shows it,
+# and logs to stdout so you can watch real numbers live while the server runs.
+@app.middleware("http")
+async def add_timing_header(request: Request, call_next):
+    t_start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - t_start) * 1000
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.2f}"
+    if request.url.path.startswith("/api/"):
+        method = request.method
+        path = request.url.path
+        status = response.status_code
+        print(f"[TIMING] {method} {path} -> {elapsed_ms:.2f}ms  [{status}]")
     return response
 
 # Serve static frontend files
@@ -124,6 +148,13 @@ async def root():
     if os.path.exists(index_path):
         return FileResponse(index_path)
     return {"message": "Smart Content Recommender API", "docs": "/docs"}
+
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint for uptime pingers (e.g. UptimeRobot) to keep backend awake."""
+    return {"status": "ok", "message": "Smart Content Recommender API is healthy and awake"}
+
 
 
 @app.get("/api/titles")

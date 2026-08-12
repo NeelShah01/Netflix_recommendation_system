@@ -37,3 +37,6 @@ Thumbs.db
 # ─── Node (frontend package manager artifacts) ────────────────────────────────
 node_modules/
 npm-debug.log*
+
+# ─── Markdown Documentations ───────────────────────────────────────────────────────────
+interview_prep.md
