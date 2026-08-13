@@ -4,6 +4,10 @@
     {
       "source": "/api/:path*",
       "destination": "https://smart-content-recommender.onrender.com/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }

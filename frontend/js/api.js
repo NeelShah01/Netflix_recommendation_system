@@ -10,13 +10,13 @@
  */
 
 const API = (() => {
-  const RENDER_BACKEND_URL = 'https://smart-content-recommender.onrender.com';
-
+  // On Vercel: use relative URL so requests go through Vercel's /api proxy rewrite → Render.
+  // On localhost: call the local backend directly.
   const BASE_URL = (typeof window !== 'undefined' && window.location)
-  ? (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-      ? 'http://127.0.0.1:8000'
-      : RENDER_BACKEND_URL)
-  : 'http://127.0.0.1:8000';
+    ? (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+        ? 'http://127.0.0.1:8000'
+        : '')   // empty string = relative URLs, routed via Vercel's proxy
+    : 'http://127.0.0.1:8000';
 
   const cache = new Map();
   const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
