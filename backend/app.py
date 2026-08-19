@@ -106,12 +106,26 @@ app.add_middleware(
 
 # Cache-control middleware to prevent browsers caching failed API states
 @app.middleware("http")
-async def add_no_cache_headers(request: Request, call_next):
+async def add_cache_headers(request: Request, call_next):
     response = await call_next(request)
     if request.url.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
+        path = request.url.path
+        cacheable_prefixes = (
+            "/api/titles/index",
+            "/api/genres",
+            "/api/stats",
+            "/api/trending",
+            "/api/clusters",
+            "/api/title/",
+            "/api/media/"
+        )
+        if request.method == "GET" and any(path == p or path.startswith(p) for p in cacheable_prefixes):
+            # Cache heavily to prevent slow page loads on repeated visits
+            response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=86400"
+        else:
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
     return response
 
 
