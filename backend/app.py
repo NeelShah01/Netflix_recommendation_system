@@ -161,7 +161,7 @@ if os.path.exists(FRONTEND_DIR):
 # ──────────────────────────────────────────────
 
 @app.get("/")
-async def root():
+def root():
     """API Root — Return service status and documentation link."""
     return {
         "status": "online",
@@ -173,14 +173,14 @@ async def root():
 
 
 @app.get("/api/health")
-async def health_check():
+def health_check():
     """Health check endpoint for uptime pingers (e.g. UptimeRobot) to keep backend awake."""
     return {"status": "ok", "message": "Smart Content Recommender API is healthy and awake"}
 
 
 
 @app.get("/api/titles")
-async def search_titles(
+def search_titles(
     q: str = Query("", description="Search query for title autocomplete"),
     limit: int = Query(10, ge=1, le=50)
 ):
@@ -192,7 +192,7 @@ async def search_titles(
 
 
 @app.get("/api/titles/index")
-async def get_titles_index():
+def get_titles_index():
     """
     Return a compact index of ALL titles for client-side instant search.
     Only includes fields needed for autocomplete: show_id, title, type, release_year, rating, listed_in.
@@ -202,7 +202,7 @@ async def get_titles_index():
 
 
 @app.get("/api/title/{show_id}")
-async def get_title(show_id: str):
+def get_title(show_id: str):
     """Get full details for a specific title by show_id."""
     result = engine.get_title_details(show_id)
     if result is None:
@@ -387,19 +387,19 @@ def get_media_metadata(show_id: str):
 
 
 @app.get("/api/genres")
-async def get_genres():
+def get_genres():
     """Get all available genres sorted alphabetically."""
     return engine.get_all_genres()
 
 
 @app.get("/api/stats")
-async def get_stats():
+def get_stats():
     """Get dataset statistics for the dashboard section."""
     return engine.get_stats()
 
 
 @app.post("/api/recommend")
-async def recommend(req: RecommendRequest):
+def recommend(req: RecommendRequest):
     """
     Get content-based recommendations for a single title.
     Uses TF-IDF cosine similarity on combined metadata features.
@@ -427,7 +427,7 @@ async def recommend(req: RecommendRequest):
 
 
 @app.post("/api/recommend/cast")
-async def recommend_by_cast(req: CastRecommendRequest):
+def recommend_by_cast(req: CastRecommendRequest):
     """
     Get cast-based recommendations for a single title.
     Finds titles with the most overlapping cast members.
@@ -454,7 +454,7 @@ async def recommend_by_cast(req: CastRecommendRequest):
 
 
 @app.post("/api/recommend/multi")
-async def recommend_multi(req: MultiRecommendRequest):
+def recommend_multi(req: MultiRecommendRequest):
     """
     Get recommendations based on multiple liked titles.
     Computes an average TF-IDF profile and finds nearest neighbors.
@@ -481,7 +481,7 @@ async def recommend_multi(req: MultiRecommendRequest):
 
 
 @app.post("/api/recommend/genre")
-async def recommend_by_genre(req: GenreRecommendRequest):
+def recommend_by_genre(req: GenreRecommendRequest):
     """
     Get recommendations filtered by genre and/or mood.
     Mood values: feel-good, intense, dark, thought-provoking
@@ -508,13 +508,13 @@ async def recommend_by_genre(req: GenreRecommendRequest):
 
 
 @app.get("/api/clusters")
-async def get_clusters():
+def get_clusters():
     """Get cluster data for 2D scatter plot visualization."""
     return engine.get_cluster_data()
 
 
 @app.get("/api/clusters/{cluster_id}")
-async def get_cluster_titles(cluster_id: int, n: int = Query(20, ge=1, le=50)):
+def get_cluster_titles(cluster_id: int, n: int = Query(20, ge=1, le=50)):
     """Get titles belonging to a specific cluster."""
     results = engine.get_cluster_titles(cluster_id, n=n)
     label = engine.pca_data['cluster_labels'].get(cluster_id, f'Cluster {cluster_id}')
@@ -527,7 +527,7 @@ async def get_cluster_titles(cluster_id: int, n: int = Query(20, ge=1, le=50)):
 
 
 @app.get("/api/trending")
-async def get_trending(
+def get_trending(
     n: int = Query(20, ge=1, le=50),
     content_type: Optional[str] = Query(None)
 ):
@@ -597,7 +597,7 @@ def sha256_hash(text: str) -> str:
 # --- Authentication ---
 
 @app.post("/api/auth/register")
-async def register(req: RegisterRequest):
+def register(req: RegisterRequest):
     email_clean = req.email.strip().lower()
     if users_col.find_one({"email": email_clean}):
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
@@ -629,7 +629,7 @@ async def register(req: RegisterRequest):
 
 
 @app.post("/api/auth/login")
-async def login(req: LoginRequest):
+def login(req: LoginRequest):
     email_clean = req.email.strip().lower()
     user = users_col.find_one({"email": email_clean})
     if not user:
@@ -651,7 +651,7 @@ async def login(req: LoginRequest):
 
 
 @app.post("/api/auth/google")
-async def google_login(req: GoogleLoginRequest):
+def google_login(req: GoogleLoginRequest):
     email_clean = req.email.strip().lower()
     user = users_col.find_one({"email": email_clean})
     
@@ -695,7 +695,7 @@ async def google_login(req: GoogleLoginRequest):
 # --- Watchlists ---
 
 @app.get("/api/watchlist")
-async def get_watchlists(user_id: str):
+def get_watchlists(user_id: str):
     lists = list(watchlists_col.find({"user_id": user_id}, {"_id": 0}))
     # Format to match client structure: { list_name: items[] }
     result = {}
@@ -705,7 +705,7 @@ async def get_watchlists(user_id: str):
 
 
 @app.post("/api/watchlist/create")
-async def create_watchlist(req: CreateWatchlistRequest):
+def create_watchlist(req: CreateWatchlistRequest):
     # Check if list already exists
     existing = watchlists_col.find_one({"user_id": req.user_id, "name": req.name})
     if existing:
@@ -720,13 +720,13 @@ async def create_watchlist(req: CreateWatchlistRequest):
 
 
 @app.delete("/api/watchlist")
-async def delete_watchlist(user_id: str, name: str):
+def delete_watchlist(user_id: str, name: str):
     watchlists_col.delete_one({"user_id": user_id, "name": name})
     return {"success": True}
 
 
 @app.post("/api/watchlist/item/add")
-async def add_watchlist_item(req: WatchlistItemRequest):
+def add_watchlist_item(req: WatchlistItemRequest):
     # Ensure watchlist exists
     wl = watchlists_col.find_one({"user_id": req.user_id, "name": req.list_name})
     if not wl:
@@ -756,7 +756,7 @@ async def add_watchlist_item(req: WatchlistItemRequest):
 
 
 @app.post("/api/watchlist/item/remove")
-async def remove_watchlist_item(req: WatchlistItemRequest):
+def remove_watchlist_item(req: WatchlistItemRequest):
     watchlists_col.update_one(
         {"user_id": req.user_id, "name": req.list_name},
         {"$pull": {"items": {"show_id": req.show_id}}}
@@ -767,13 +767,13 @@ async def remove_watchlist_item(req: WatchlistItemRequest):
 # --- Watched History ---
 
 @app.get("/api/watched")
-async def get_watched(user_id: str):
+def get_watched(user_id: str):
     history = list(watched_col.find({"user_id": user_id}, {"_id": 0}))
     return history
 
 
 @app.post("/api/watched/add")
-async def add_watched(req: WatchedItemRequest):
+def add_watched(req: WatchedItemRequest):
     # Check duplicate
     existing = watched_col.find_one({"user_id": req.user_id, "show_id": req.show_id})
     if existing:
@@ -791,7 +791,7 @@ async def add_watched(req: WatchedItemRequest):
 
 
 @app.post("/api/watched/remove")
-async def remove_watched(req: WatchedItemRequest):
+def remove_watched(req: WatchedItemRequest):
     watched_col.delete_one({"user_id": req.user_id, "show_id": req.show_id})
     return {"success": True}
 
@@ -799,7 +799,7 @@ async def remove_watched(req: WatchedItemRequest):
 # --- Catalog Admin (Dynamic Schema support!) ---
 
 @app.post("/api/catalog/item")
-async def create_catalog_item(body: dict):
+def create_catalog_item(body: dict):
     """
     Dynamically insert a new movie/show.
     Accepts arbitrary JSON fields.
@@ -819,7 +819,7 @@ async def create_catalog_item(body: dict):
 
 
 @app.put("/api/catalog/item/{show_id}")
-async def update_catalog_item(show_id: str, body: dict):
+def update_catalog_item(show_id: str, body: dict):
     """
     Dynamically update fields or create new fields for a specific show_id.
     Accepts arbitrary JSON fields.
@@ -833,7 +833,7 @@ async def update_catalog_item(show_id: str, body: dict):
 
 
 @app.delete("/api/catalog/item/{show_id}")
-async def delete_catalog_item(show_id: str):
+def delete_catalog_item(show_id: str):
     """Delete a movie/show from the database and rebuild models."""
     existing = titles_col.find_one({"show_id": show_id})
     if not existing:
@@ -846,7 +846,7 @@ async def delete_catalog_item(show_id: str):
 # --- Personalized Recommendations ---
 
 @app.get("/api/recommendations/personalized")
-async def get_personalized_recommendations(
+def get_personalized_recommendations(
     user_id: str,
     limit: int = Query(20, ge=1, le=50),
     exclude_genres: Optional[List[str]] = Query(None),
@@ -905,7 +905,7 @@ async def get_personalized_recommendations(
 # --- Ratings & Reviews ---
 
 @app.get("/api/reviews/{show_id}")
-async def get_reviews(show_id: str):
+def get_reviews(show_id: str):
     """Retrieve all ratings/reviews and calculate the average rating for a show."""
     try:
         reviews = list(reviews_col.find({"show_id": show_id}, {"_id": 0}))
@@ -933,7 +933,7 @@ async def get_reviews(show_id: str):
 
 
 @app.post("/api/reviews/submit")
-async def submit_review(req: ReviewSubmitRequest):
+def submit_review(req: ReviewSubmitRequest):
     """Submit or update a rating and review for a show."""
     try:
         review_record = {
